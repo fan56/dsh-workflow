@@ -2,7 +2,7 @@
 status: open
 type: research
 blocked-by: []
-claimed-by: null
+claimed-by: fan56
 ---
 
 # 社区 capsule 解剖:147⭐ 插件的五面做法

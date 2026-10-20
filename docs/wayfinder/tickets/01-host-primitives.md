@@ -2,7 +2,7 @@
 status: open
 type: research
 blocked-by: []
-claimed-by: null
+claimed-by: fan56
 ---
 
 # 宿主原语实测:0.2.1-rc.2 的执行层地基

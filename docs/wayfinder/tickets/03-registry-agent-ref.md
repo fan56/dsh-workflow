@@ -2,7 +2,7 @@
 status: open
 type: research
 blocked-by: []
-claimed-by: null
+claimed-by: fan56
 ---
 
 # registry agent 引用:步骤→roster 执行契约
