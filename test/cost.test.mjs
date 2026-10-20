@@ -8,14 +8,14 @@ import assert from 'node:assert/strict'
 const { foldChildUsage } = await import('../lib/cost.js')
 
 function fakePersistence(events) {
-  return {
-    sessionPersistence: {
-      open: async () => ({
-        read: async () => ({ events }),
-        close: async () => {},
-      }),
-    },
+  const persistence = {
+    open: async () => ({
+      read: async () => ({ events }),
+      close: async () => {},
+    }),
   }
+  // The real host resolves the service through the untyped ctx.get side door.
+  return { sessionPersistence: persistence, get: (name) => (name === 'sessionPersistence' ? persistence : undefined) }
 }
 
 test('usage accumulates across turns; route comes from the last request/header', async () => {

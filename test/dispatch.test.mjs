@@ -44,6 +44,9 @@ function makeFakeHost({ usageEvents = [], childAgent } = {}) {
     sessionPersistence: {
       open: async () => ({ read: async () => ({ events: usageEvents }), close: async () => {} }),
     },
+    get(name) {
+      return name === 'sessionPersistence' ? this.sessionPersistence : undefined
+    },
   }
   host.activations = activations
   return host
@@ -107,10 +110,10 @@ test('leaf agent (deep 0): deny list intersects host-known tools, no maxDepth, p
   }
 })
 
-test('usage folds from the child session and lands on the outcome', async () => {
+test('usage folds from the child session and lands on the outcome; frontmatter routes split', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'wf-dsp-'))
   try {
-    makeRoster(dir)
+    makeRoster(dir, { worker: { deep: '0', model: 'prov-x/m-9', thinking: 'low' } })
     const host = makeFakeHost({
       usageEvents: [
         { type: 'assistant/message', data: { usage: { inputTokens: 11, outputTokens: 7 } } },
@@ -120,6 +123,9 @@ test('usage folds from the child session and lands on the outcome', async () => 
     const dispatch = createDispatch(host, { parent: PARENT, runId: 'r9', agentsDir: dir })
     const outcome = await dispatch({ agentName: 'worker', prompt: 'p', label: 's1' })
     assert.deepEqual(outcome.usage, { inputTokens: 11, outputTokens: 7, totalTokens: 18, provider: 'prov', model: 'm' })
+    // The frontmatter `provider/model` route is split, never passed whole.
+    const spec = host.activations.at(-1)
+    assert.deepEqual(spec.request.agentOptions, { provider: 'prov-x', model: 'm-9', reasoningEffort: 'low' })
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

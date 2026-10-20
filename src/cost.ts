@@ -33,8 +33,21 @@ interface PersistenceLike {
 }
 
 function getPersistence(host: unknown): PersistenceLike | undefined {
-  const candidate = (host as { sessionPersistence?: PersistenceLike }).sessionPersistence
-  if (candidate !== undefined && typeof candidate.open === 'function') return candidate
+  try {
+    // cordis guards PROPERTY access by the plugin's inject list — a bare
+    // `host.sessionPersistence` read THROWS on an unlisted plugin and the
+    // exception tunnels out through the caller's `.catch` (real-host
+    // verified: the whole fold died silently right here). Everything goes
+    // through the untyped `get`, inside this one try.
+    const getter = (host as { get?: (key: string) => unknown }).get
+    if (typeof getter !== 'function') {
+      return undefined
+    }
+    const candidate = getter.call(host, 'sessionPersistence') as PersistenceLike | undefined
+    if (candidate !== undefined && typeof candidate.open === 'function') return candidate
+  } catch {
+    /* service absent */
+  }
   return undefined
 }
 
@@ -48,13 +61,26 @@ function pickRoute(data: unknown): { provider?: string; model?: string } {
   }
 }
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
 /**
  * Fold one child session's usage. Best-effort on every leg; `undefined` when
- * the log is unavailable (no persistence, dead session) — never throws.
+ * the log stays unavailable — never throws. Persistence flushes lazily after
+ * child settlement, so a first read can legitimately return an empty log:
+ * retry with a short backoff before giving up (real-host verified).
  */
 export async function foldChildUsage(host: unknown, childId: SessionId): Promise<UsageSummary | undefined> {
   const persistence = getPersistence(host)
   if (persistence === undefined) return undefined
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const summary = await tryFoldOnce(persistence, childId)
+    if (summary !== undefined) return summary
+    if (attempt < 5) await sleep(500)
+  }
+  return undefined
+}
+
+async function tryFoldOnce(persistence: PersistenceLike, childId: SessionId): Promise<UsageSummary | undefined> {
   let handle: Awaited<ReturnType<PersistenceLike['open']>>
   try {
     handle = await persistence.open(childId, 'read')
@@ -80,7 +106,10 @@ export async function foldChildUsage(host: unknown, childId: SessionId): Promise
       if (typeof u.inputTokens === 'number') inputTokens += u.inputTokens
       if (typeof u.outputTokens === 'number') outputTokens += u.outputTokens
       if (typeof u.reasoningTokens === 'number') reasoningTokens = (reasoningTokens ?? 0) + u.reasoningTokens
-      if (typeof u.cacheRead === 'number') cacheReadTokens = (cacheReadTokens ?? 0) + u.cacheRead
+      // The host spells the cache-hit field `cacheReadTokens` (real logs);
+      // `cacheRead` kept as a defensive alias.
+      const cacheRead = typeof u.cacheReadTokens === 'number' ? u.cacheReadTokens : (typeof u.cacheRead === 'number' ? u.cacheRead : undefined)
+      if (cacheRead !== undefined) cacheReadTokens = (cacheReadTokens ?? 0) + cacheRead
     }
     if (inputTokens === 0 && outputTokens === 0 && route.provider === undefined && route.model === undefined) {
       return undefined

@@ -119,6 +119,7 @@ export function createRunStore(options: RunStoreOptions): RunStore {
         attempts: outcome.attempts,
         ...(outcome.error !== undefined ? { error: outcome.error } : {}),
         ...(outcome.output !== undefined && outcome.output.length <= 4000 ? { output: outcome.output } : {}),
+        ...(outcome.usage !== undefined ? { usage: outcome.usage } : {}),
       }
       appendEvent(type, { stepId, attempts: outcome.attempts, ...(outcome.error !== undefined ? { error: outcome.error } : {}) })
       safeWrite(`results/${stepId}.json write`, () => {
@@ -129,6 +130,7 @@ export function createRunStore(options: RunStoreOptions): RunStore {
           ...(outcome.output !== undefined ? { output: outcome.output } : {}),
           ...(outcome.structured !== undefined ? { structured: outcome.structured } : {}),
           ...(outcome.actionOutput !== undefined ? { actionOutput: outcome.actionOutput } : {}),
+          ...(outcome.usage !== undefined ? { usage: outcome.usage } : {}),
           ...(outcome.error !== undefined ? { error: outcome.error } : {}),
         }, null, 2)}\n`)
       })

@@ -20,12 +20,14 @@ import { registerWorkflowCommand, type CommandHost } from './commands.ts'
 export const name = 'dsh-workflow'
 
 /**
- * Services required by this plugin. `commands` is this plugin's only M1
- * surface (the trigger path); `subagents` is the execution seam. Both come
- * with every dsh-base profile — missing either is a deployment
- * misconfiguration that should fail loud at load.
+ * Services required by this plugin. `commands` is the trigger path and
+ * `subagents` the execution seam; `agents`/`tools`/`systemPrompt` are the
+ * out-of-band child composition's surface (persona section + leaf restrict
+ * install on the child scope at the start edge — cordis rejects the property
+ * access without the inject declaration, proven by a real-host boot).
+ * All of them come with every dsh-base profile.
  */
-export const inject = ['commands', 'subagents']
+export const inject = ['commands', 'subagents', 'agents', 'tools', 'systemPrompt']
 
 export function apply(context: CommandHost): void {
   // The command handler assembles its own engine per run (dispatch needs the

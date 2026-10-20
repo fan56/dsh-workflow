@@ -52,6 +52,7 @@ export interface DispatchHost extends CompositionHost {
       signal?: AbortSignal
       delivery: 'parent' | 'caller'
     }): Promise<{
+      childId: SessionId
       result: Promise<{ output: ReadonlyArray<{ type?: string; text?: string }>; structured?: unknown; stopReason: string }>
       dispose: () => Promise<void>
     }>
@@ -93,6 +94,13 @@ function joinOutput(output: ReadonlyArray<{ type?: string; text?: string }>): st
     .trim()
 }
 
+/** Split a `provider/model` route (registry's `splitModel` parity): no slash = provider only. */
+function splitModelRoute(route: string): { provider?: string; model?: string } {
+  const slash = route.indexOf('/')
+  if (slash === -1) return { provider: route }
+  return { provider: route.slice(0, slash), model: route.slice(slash + 1) }
+}
+
 /** Build the real DispatchFn: resolve roster, compose out-of-band, start, await, fold cost. */
 export function createDispatch(host: DispatchHost, factoryOptions: DispatchFactoryOptions): DispatchFn {
   const provider = factoryOptions.provider ?? 'spawn'
@@ -104,8 +112,21 @@ export function createDispatch(host: DispatchHost, factoryOptions: DispatchFacto
     const deep = agent.meta.deep
 
     // Routing: explicit step overrides over the agent file's frontmatter.
-    const effectiveModel = request.model ?? agent.meta.model
+    // A frontmatter route is `provider/model` and must be SPLIT — passing the
+    // whole string as `model` makes the host look for a model literally named
+    // "provider/model" under the current provider (real-host verified failure).
+    const routeOverride = request.model !== undefined
+      ? splitModelRoute(request.model)
+      : agent.meta.model !== undefined
+        ? splitModelRoute(agent.meta.model)
+        : {}
     const effectiveThinking = request.thinking ?? agent.meta.thinking
+    const agentOptions = {
+      ...(routeOverride.provider !== undefined ? { provider: routeOverride.provider } : {}),
+      ...(routeOverride.model !== undefined ? { model: routeOverride.model } : {}),
+      ...(effectiveThinking !== undefined ? { reasoningEffort: effectiveThinking } : {}),
+    }
+    const hasAgentOptions = routeOverride.provider !== undefined || routeOverride.model !== undefined || effectiveThinking !== undefined
 
     // Depth policy: a relative budget for spawners, a deny list for leaves.
     const toolFilter = deep === 0 ? { deny: leafDenyList(host) } : undefined
@@ -124,9 +145,7 @@ export function createDispatch(host: DispatchHost, factoryOptions: DispatchFacto
         request: {
           prompt: [{ type: 'text', text: request.prompt }],
           parent: factoryOptions.parent,
-          ...(effectiveModel !== undefined || effectiveThinking !== undefined
-            ? { agentOptions: { ...(effectiveModel !== undefined ? { model: effectiveModel } : {}), ...(effectiveThinking !== undefined ? { reasoningEffort: effectiveThinking } : {}) } }
-            : {}),
+          ...(hasAgentOptions ? { agentOptions } : {}),
           ...(request.outputSchema !== undefined ? { outputSchema: request.outputSchema } : {}),
           ...(maxDepth !== undefined ? { maxDepth } : {}),
         },
@@ -139,11 +158,17 @@ export function createDispatch(host: DispatchHost, factoryOptions: DispatchFacto
       throw error
     }
 
-    factoryOptions.events?.childStarted(childId, request.label)
+    factoryOptions.events?.childStarted(activation.childId, request.label)
     try {
       const result = await activation.result
-      factoryOptions.events?.childSettled(childId, result.stopReason)
-      const usage = await foldChildUsage(host, childId).catch(() => undefined)
+      factoryOptions.events?.childSettled(activation.childId, result.stopReason)
+      // Dispose BEFORE the cost fold: disposal reaches child quiescence and
+      // flushes the child's log — folding earlier races the persistence and
+      // reads nothing (real-host verified).
+      await activation.dispose()
+      // The activation's returned childId is the identity the host actually
+      // persisted under — the request's optional childId is not authoritative.
+      const usage = await foldChildUsage(host, activation.childId).catch(() => undefined)
       const outcome: DispatchOutcome = {
         text: joinOutput(result.output),
         stopReason: result.stopReason,
@@ -151,12 +176,13 @@ export function createDispatch(host: DispatchHost, factoryOptions: DispatchFacto
         ...(usage !== undefined ? { usage } : {}),
       }
       return outcome
-    } finally {
+    } catch (error) {
       try {
         await activation.dispose()
-      } catch (error) {
-        warn(`child ${label} disposal failed: ${error instanceof Error ? error.message : String(error)}`)
+      } catch {
+        /* the primary error matters more */
       }
+      throw error
     }
   }
 }
