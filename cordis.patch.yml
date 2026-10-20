@@ -1,0 +1,9 @@
+# dsh-workflow bundle patch.
+#
+# The bundle's own plugin row must be an explicit `insert` — the host loader
+# never auto-mounts a bundle's main package (same lesson as dsh-ptc-subagent,
+# verified 2026-10-14). The `id` is the settings namespace; it must stay
+# unique across every patch layer in the profile.
+- insert:
+    - id: dsh-workflow
+      name: '@aiwayds/dsh-workflow'

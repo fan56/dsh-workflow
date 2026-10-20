@@ -1,0 +1,146 @@
+name: Publish
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org/
+
+      - name: Install dsh CLI (rolling rc/stable line — newest of latest/next, never alpha; wave-pinned closure, falls back to the other tag)
+        run: |
+          # Policy (2026-09-03): the alpha line is retired for CI. Resolve the
+          # newest of the `latest` (stable) and `next` (rc) dist-tags at
+          # runtime, never hand-pinned — when a stable 0.1.2+ lands on
+          # `latest` it wins over the rc by plain semver compare. Mirrors
+          # ci.yml so the release gates against the same host closure.
+          STABLE="$(npm view @deepseek-ai/dsh@latest version)"
+          RC="$(npm view @deepseek-ai/dsh@next version 2>/dev/null || true)"
+          DSH_VERSION="$STABLE"
+          if [ -n "$RC" ] && [ "$(printf '%s\n' "$STABLE" "$RC" | sort -V | tail -1)" = "$RC" ]; then
+            DSH_VERSION="$RC"
+          fi
+          # The install goes into a scratch prefix as the publish wave's OWN
+          # closure: every @deepseek-ai/* range the resolved version declares
+          # is pinned to its base version via npm overrides. A plain
+          # `npm install -g dsh@$VER` is not resilient enough:
+          # 1. a caret range like ^0.1.5-rc.2 FLOATS to a newer prerelease in
+          #    the same tower, so one incomplete upstream wave (next=0.1.5-rc.3
+          #    shipped without dsh-client-ui-sidebar-documentpreview@rc.3)
+          #    poisons fresh installs of the OLDER, complete version too;
+          # 2. a wave with missing base versions fails HERE — instead of
+          #    redding CI on upstream's breakage — and falls back to the other
+          #    dist-tag; both ends uninstallable stays red (a real signal).
+          ALT=""
+          if [ "$DSH_VERSION" != "$STABLE" ]; then
+            ALT="$STABLE"
+          elif [ -n "$RC" ] && [ "$RC" != "$DSH_VERSION" ]; then
+            ALT="$RC"
+          fi
+          DSH_DIR="${RUNNER_TEMP:-/tmp}/dsh-cli-install"
+          install_dsh() {
+            local ver="$1" dir="$2"
+            node -e '
+              const { execFileSync } = require("node:child_process")
+              const { writeFileSync, mkdirSync } = require("node:fs")
+              const [ver, dir] = process.argv.slice(1)
+              const deps = JSON.parse(execFileSync("npm", ["view", `@deepseek-ai/dsh@${ver}`, "dependencies", "--json"], { encoding: "utf8" }))
+              const overrides = {}
+              for (const [name, range] of Object.entries(deps ?? {})) {
+                if (name.startsWith("@deepseek-ai/") && /^[~^]/.test(range)) overrides[name] = range.replace(/^[~^]/, "")
+              }
+              mkdirSync(dir, { recursive: true })
+              writeFileSync(`${dir}/package.json`, JSON.stringify({
+                name: "dsh-ci-install",
+                private: true,
+                dependencies: { "@deepseek-ai/dsh": ver },
+                overrides,
+              }, null, 2))
+            ' "$ver" "$dir"
+            (cd "$dir" && npm install --no-audit --no-fund >/dev/null)
+          }
+          echo "dsh closure: ${DSH_VERSION}"
+          if ! install_dsh "$DSH_VERSION" "$DSH_DIR"; then
+            if [ -z "$ALT" ]; then
+              echo "::error:: dsh@${DSH_VERSION} won't install and there is no other dist-tag to fall back to"
+              exit 1
+            fi
+            echo "::warning:: dsh@${DSH_VERSION} won't install (incomplete upstream publish wave?) — falling back to ${ALT}"
+            DSH_DIR="${RUNNER_TEMP:-/tmp}/dsh-cli-install-fallback"
+            install_dsh "$ALT" "$DSH_DIR" || { echo "::error:: neither ${DSH_VERSION} nor ${ALT} installs"; exit 1; }
+          fi
+          # Later steps (link-dsh-closure, boot smoke) use the scratch CLI.
+          echo "${DSH_DIR}/node_modules/.bin" >> "$GITHUB_PATH"
+          echo "DSH_CLOSURE_DIR=${DSH_DIR}/node_modules/@deepseek-ai" >> "$GITHUB_ENV"
+
+      - name: Link dsh closure types
+        run: node scripts/link-dsh-closure.mjs
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      # Gate the release on the same checks CI runs per push.
+      - name: Typecheck
+        run: npm run check
+
+      - name: Test
+        run: npm test
+
+      - name: Stamp package.json to the tag version
+        # The tag is the single source of truth for what gets published (the
+        # dsh-tui-pi@1.1.0 flow). Small patches skip the version-bump commit —
+        # push the fix, tag it, and the workflow rewrites package.json here
+        # (--allow-same-version makes a matching version a no-op). main's
+        # package.json may lag behind npm; the next deliberate bump
+        # (`npm version minor|major`) starts from whatever main carries, and
+        # the stamp keeps publishes tag-accurate.
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          npm version "${TAG_VERSION}" --no-git-tag-version --allow-same-version
+          echo "publishing @aiwayds/dsh-ptc-subagent@${TAG_VERSION} (tag ${GITHUB_REF_NAME})"
+      - name: Publish
+        # A re-pushed tag (or a publish landing mid-run) can race an
+        # already-published version. npm versions are immutable, so if the
+        # version is already on npm — visible up front via `npm view`, or
+        # matched by the registry's "cannot publish over" 403 after the
+        # first PUT succeeded — degrade to a warning instead of failing.
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          # Prerelease tags publish on a side dist-tag — a test version never
+          # moves `latest`. Default-deny: any hyphen-suffixed tag is a
+          # prerelease. v2.10.0 → latest · v2.10.0-rc.1 → next ·
+          # v2.10.0-alpha.1 → alpha. Release policy: main carries no tag by
+          # default; a deliberate v* tag is the only path to npm.
+          case "$TAG_VERSION" in
+            *-alpha.*) NPM_TAG="alpha" ;;
+            *-*) NPM_TAG="next" ;;
+            *) NPM_TAG="latest" ;;
+          esac
+          echo "npm dist-tag: ${NPM_TAG}"
+          if npm view "@aiwayds/dsh-ptc-subagent@${TAG_VERSION}" version >/dev/null 2>&1; then
+            echo "::warning::@aiwayds/dsh-ptc-subagent@${TAG_VERSION} is already on npm — skipping publish"
+            exit 0
+          fi
+          set +e
+          PUB_OUT="$(npm publish --access public --provenance --tag "$NPM_TAG" 2>&1)"
+          PUB_RC=$?
+          set -e
+          printf '%s\n' "$PUB_OUT"
+          if [ "${PUB_RC}" -ne 0 ] && printf '%s' "$PUB_OUT" | grep -q "cannot publish over the previously published versions"; then
+            echo "::warning::@aiwayds/dsh-ptc-subagent@${TAG_VERSION} was published concurrently (or landed mid-publish) — treating as success"
+            exit 0
+          fi
+          exit "${PUB_RC}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

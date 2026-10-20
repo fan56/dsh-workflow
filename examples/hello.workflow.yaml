@@ -1,0 +1,16 @@
+format: dsh-workflow
+version: 1
+
+name: hello
+description: Minimal single-step smoke workflow — proves the loader, engine, and real dispatch end to end.
+
+inputs: []
+
+steps:
+  - id: greet
+    executor:
+      agent: workhorse
+    prompt: |
+      Reply with exactly this line and nothing else: workflow hello OK
+    acceptance:
+      - output-matches: "workflow hello OK"

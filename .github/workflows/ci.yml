@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Daily 03:39 UTC — catches upstream dsh drift without hand-pinning.
+    - cron: '39 3 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        # The shipped engines floor plus current LTS.
+        node-version: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      # Typechecking imports @deepseek-ai/* from the global dsh closure via
+      # scripts/link-dsh-closure.mjs. A pristine runner has none, so install
+      # the public CLI first — it carries the closure the linker resolves.
+      # Rolling rc/stable line (newest of latest/next at runtime), never
+      # hand-pinned and never the retired `alpha` dist-tag.
+      - name: Install dsh CLI (rolling rc/stable line — newest of latest/next, never alpha; wave-pinned closure, falls back to the other tag)
+        run: |
+          # Policy (2026-09-03): the alpha line is retired for CI. Resolve the
+          # newest of the `latest` (stable) and `next` (rc) dist-tags at
+          # runtime, never hand-pinned — when a stable 0.1.2+ lands on
+          # `latest` it wins over the rc by plain semver compare.
+          STABLE="$(npm view @deepseek-ai/dsh@latest version)"
+          RC="$(npm view @deepseek-ai/dsh@next version 2>/dev/null || true)"
+          # Newest-of(latest,next), restored for the 0.2.1 migration —
+          # prerelease-aware node compare, NOT sort -V (trap on record:
+          # sort -V ranks 0.2.1-rc.2 ABOVE 0.2.1 and would pick the older
+          # rc once a stable lands on `latest`).
+          DSH_VERSION="$STABLE"
+          if [ -n "$RC" ] && node -e '
+            const parse = (v) => { const [core, pre] = v.split("-"); return { c: core.split(".").map(Number), pre } }
+            const A = parse(process.argv[1]), B = parse(process.argv[2])
+            for (let i = 0; i < 3; i++) {
+              if (A.c[i] !== B.c[i]) process.exit(A.c[i] > B.c[i] ? 0 : 1)
+            }
+            if ((A.pre === undefined) !== (B.pre === undefined)) process.exit(A.pre === undefined ? 0 : 1)
+            process.exit(String(A.pre ?? "") >= String(B.pre ?? "") ? 0 : 1)
+          ' "$RC" "$STABLE"; then
+            DSH_VERSION="$RC"
+          fi
+          # The install goes into a scratch prefix as the publish wave's OWN
+          # closure: every @deepseek-ai/* range the resolved version declares
+          # is pinned to its base version via npm overrides. A plain
+          # `npm install -g dsh@$VER` is not resilient enough:
+          # 1. a caret range like ^0.1.5-rc.2 FLOATS to a newer prerelease in
+          #    the same tower, so one incomplete upstream wave (next=0.1.5-rc.3
+          #    shipped without dsh-client-ui-sidebar-documentpreview@rc.3)
+          #    poisons fresh installs of the OLDER, complete version too;
+          # 2. a wave with missing base versions fails HERE — instead of
+          #    redding CI on upstream's breakage — and falls back to the other
+          #    dist-tag; both ends uninstallable stays red (a real signal).
+          ALT=""
+          if [ "$DSH_VERSION" != "$STABLE" ]; then
+            ALT="$STABLE"
+          elif [ -n "$RC" ] && [ "$RC" != "$DSH_VERSION" ]; then
+            ALT="$RC"
+          fi
+          DSH_DIR="${RUNNER_TEMP:-/tmp}/dsh-cli-install"
+          install_dsh() {
+            local ver="$1" dir="$2"
+            node -e '
+              const { execFileSync } = require("node:child_process")
+              const { writeFileSync, mkdirSync } = require("node:fs")
+              const [ver, dir] = process.argv.slice(1)
+              const deps = JSON.parse(execFileSync("npm", ["view", `@deepseek-ai/dsh@${ver}`, "dependencies", "--json"], { encoding: "utf8" }))
+              const overrides = {}
+              for (const [name, range] of Object.entries(deps ?? {})) {
+                if (name.startsWith("@deepseek-ai/") && /^[~^]/.test(range)) overrides[name] = range.replace(/^[~^]/, "")
+              }
+              mkdirSync(dir, { recursive: true })
+              writeFileSync(`${dir}/package.json`, JSON.stringify({
+                name: "dsh-ci-install",
+                private: true,
+                dependencies: { "@deepseek-ai/dsh": ver },
+                overrides,
+              }, null, 2))
+            ' "$ver" "$dir"
+            (cd "$dir" && npm install --no-audit --no-fund >/dev/null)
+          }
+          echo "dsh closure: ${DSH_VERSION}"
+          if ! install_dsh "$DSH_VERSION" "$DSH_DIR"; then
+            if [ -z "$ALT" ]; then
+              echo "::error:: dsh@${DSH_VERSION} won't install and there is no other dist-tag to fall back to"
+              exit 1
+            fi
+            echo "::warning:: dsh@${DSH_VERSION} won't install (incomplete upstream publish wave?) — falling back to ${ALT}"
+            DSH_DIR="${RUNNER_TEMP:-/tmp}/dsh-cli-install-fallback"
+            install_dsh "$ALT" "$DSH_DIR" || { echo "::error:: neither ${DSH_VERSION} nor ${ALT} installs"; exit 1; }
+          fi
+          # Later steps (link-dsh-closure, boot smoke) use the scratch CLI.
+          echo "${DSH_DIR}/node_modules/.bin" >> "$GITHUB_PATH"
+          echo "DSH_CLOSURE_DIR=${DSH_DIR}/node_modules/@deepseek-ai" >> "$GITHUB_ENV"
+
+      - name: Link dsh closure types
+        run: node scripts/link-dsh-closure.mjs
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run check
+
+      - name: Test
+        run: npm test
+
+      # dsh 的 profile/bundle 机器会转壳调用 pnpm 来初始化 scratch profile。
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Boot smoke (real dsh host, scratch profile)
+        run: npm run smoke
