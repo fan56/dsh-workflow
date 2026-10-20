@@ -7,9 +7,12 @@ Status: charting phase — decisions live in the [wayfinder map](../../issues) u
 
 - **Workflow** — A named pipeline that turns a recurring piece of daily work into a runnable, reviewable asset. The thing being 固化 (made durable) by this plugin.
 - **Step** — One unit of a Workflow. Declares its executor, inputs, retry policy, and acceptance check. Completion of a Step must be objectively judgeable.
-- **Action** — A JavaScript snippet allowed *only inside* a single Step. The only place imperative code may appear in a Workflow.
+- **Action** — A JavaScript snippet allowed *only inside* a single Step: a pure input-shaping function whose JSON return merges into that step's prompt context. The only place imperative code may appear in a Workflow.
 - **YAML** — The structural source of truth for a Workflow: step graph, dependencies, retries, acceptance. Imperative logic never lives here. Import/export is copying the file.
-- **Registry Agent Ref** — A Step executor that names an agent definition from [dsh-subagent-registry](https://github.com/fan56/dsh-subagent-registry) instead of carrying a raw prompt.
+- **Foreach** — A Step that fans out one templated child Step per item of an upstream output, under a bounded concurrency that queues at the workflow layer.
+- **Cache Policy** — A per-Step resume behavior: `always` (replay a completed result), `on-failure` (default: skip if completed, re-run after failure), `never` (always truly re-run; mandatory for outward-facing side effects).
+- **Confirm** — A Step flag requiring a one-shot human confirmation before an outward-facing action executes.
+- **Registry Agent Ref** — A Step executor that names an agent definition from [dsh-subagent-registry](https://github.com/fan56/dsh-subagent-registry) by its file-identity `name` (never `display_name`), resolved by re-reading the roster at dispatch time.
 - **Run** — One execution of a Workflow. Has a stable id, a lifecycle state, and a durable record that survives restarts.
 - **Run Store** — The on-disk record of Runs: state, events, and per-agent cost. The single source a Monitor projects from.
 - **Monitor** — The layer that projects run/step/agent lifecycle plus per-agent cost into the Run Store.

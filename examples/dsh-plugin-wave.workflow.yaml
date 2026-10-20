@@ -1,0 +1,103 @@
+# dsh-workflow YAML schema v1 — 草案第一次实战(dsh-plugin-wave 真流程表达力测试)
+# 双轨铁律:本文件声明结构(步骤图/依赖/重试/验收);JS 只允许出现在单步 action 内;
+# 步骤间只经声明引用传 JSON,禁共享脚本状态。
+# 引用语法:{{inputs.x}} / {{steps.<id>.output[.path]}} / {{item}}(foreach 内)
+
+format: dsh-workflow
+version: 1
+
+name: dsh-plugin-wave
+description: Official dsh RC/version-line wave migration across the plugin fleet.
+
+inputs:
+  - id: rcVersion
+    type: string
+    required: true
+    description: Target host version, e.g. 0.2.1-rc.2
+  - id: dryRun
+    type: boolean
+    default: true
+
+steps:
+  # ---- Phase 1: 情报 -------------------------------------------------
+  - id: intel
+    executor:
+      agent: workhorse            # roster 引用:~/.dsh/agents/workhorse.md 的 name
+    prompt: |
+      Fetch the official release notes / changelog for @deepseek-ai/dsh {{inputs.rcVersion}}
+      (npm dist-tags, GitHub releases, upstream discussions). Return JSON:
+      { "version": "...", "highlights": [ "...", "..." ], "breaking": [ "...", "..." ] }
+    output:                       # 可选:结构化输出契约(对象根 JSON Schema 子集)
+      type: object
+      required: [version, breaking]
+    cache: on-failure             # always | on-failure | never(默认 on-failure)
+
+  # ---- Phase 2: 影响审计 → 受影响仓清单 -------------------------------
+  - id: audit
+    needs: [intel]
+    executor:
+      agent: workhorse
+    prompt: |
+      Breaking changes to map: {{steps.intel.output.breaking}}
+      Scan ~/repo for affected dsh-* packages (compile surface, settings shape,
+      bundled deps). Return JSON: { "repos": [ { "name": "...", "why": "..." } ] }
+    output:
+      type: object
+      required: [repos]
+
+  # ---- Phase 3: 波次适配(fan-out,每仓一个 child)--------------------
+  - id: adapt
+    needs: [audit]
+    foreach:
+      over: steps.audit.output.repos
+      as: repo
+      max-concurrency: 4          # workflow 层排队,不赌宿主超限行为
+      step:
+        executor:
+          agent: workhorse
+        prompt: |
+          Adapt {{item.name}} to {{inputs.rcVersion}}: audit impact, fix compile
+          and tests, keep changes minimal. Why it matched: {{item.why}}.
+          Return a one-paragraph summary.
+        retry: { max: 2, backoff-ms: 30000 }
+        on-error: continue        # 单仓失败不断全波,收尾汇总(fail | skip | continue)
+        cache: never              # 会改文件的副作用步:续跑永远真跑
+
+  # ---- Phase 3.5: 适配汇总(单步 action 的合法用法:步内数据整形)-----
+  - id: adapt-summary
+    needs: [adapt]
+    executor:
+      agent: workhorse
+    action: |                     # 纯函数,输入=声明引用快照,返回 JSON 并入 prompt 上下文
+      const items = input.steps.adapt.output.items
+      return { failed: items.filter(i => i.error).length,
+               ok: items.filter(i => !i.error).map(i => i.name) }
+    prompt: |
+      Summarize the wave: {{steps.adapt-summary.action-output}}
+      Failed repos (if any) will be retried by a human decision, not auto.
+
+  # ---- Phase 4: 宿主升级验证 ------------------------------------------
+  - id: verify
+    needs: [adapt-summary]
+    executor:
+      agent: workhorse
+    prompt: |
+      Verify the live profile against {{inputs.rcVersion}}: dsh --profile tui --dump-config,
+      cold-start smoke, zero disabled plugins expected. Report anomalies.
+    confirm: true                 # 环境级动作,执行前一次性人工确认
+    on-error: fail
+    acceptance:
+      - output-matches: "(?i)no disabled plugins|zero disabled|clean"
+
+  # ---- Phase 5: 发版收尾 ----------------------------------------------
+  - id: release
+    needs: [verify]
+    executor:
+      agent: workhorse
+    prompt: |
+      dryRun={{inputs.dryRun}}. When dryRun, print the tag/publish plan only.
+      Otherwise execute the batch-tag release policy (Unreleased -> version bump
+      only at publish time; npm publish needs the official registry).
+    confirm: true                 # 外向动作(publish/tag)必须人工点头
+    cache: never
+    on-error: fail

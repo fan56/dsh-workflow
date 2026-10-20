@@ -30,6 +30,9 @@
 
 <!-- 每关一张票在此加一行: [票名](tickets/xx.md): 一句话答案 -->
 
+- [YAML schema v1 草稿](tickets/04-yaml-schema-prototype.md): dsh-plugin-wave 五步流水线无损表达;fan-out=foreach(拒绝 pattern 枚举);action=单步纯函数输入整形;示例 [examples/dsh-plugin-wave.workflow.yaml](../../examples/dsh-plugin-wave.workflow.yaml)
+- [run 治理](tickets/05-run-model-governance.md): 默认后台 job;续跑=step-id checkpoint+per-step cache(on-failure 默认,副作用步 never+confirm);审批=confirm 步走 userQuestions.ask;并发默认 4 工作流层排队;保留 100 runs;child Session 保留
+- [spec 综合成文](tickets/06-spec-assembly.md): **到站**——[docs/SPEC.md](../../docs/SPEC.md) v0.1 buildable,M1-M4 里程碑就绪
 - [宿主原语实测](tickets/01-host-primitives.md): `startActivation(delivery:'caller')` 范本钉死(官方 workflow-ptc 同款);child 无条件进父 catalog+continuable;**usage 不在 result 里,每 agent 成本埋点=自建 fold child Session**;命令=`ctx.commands.register`(tui/web 通吃);bundle 必须 insert 自己+entry id 唯一;approval 要开 turn,一次性确认走 `userQuestions.ask`。报告:[research/01](research/01-host-primitives-findings.md)
 - [社区 capsule 解剖](tickets/02-capsule-anatomy.md): 借鉴=白名单 fail-loud schema/run store 布局/官方 Session 事件复用(turn:null)/缓存质量门槛;避开=QuickJS 层与调用序号 effect cache,改**稳定 step id 键+显式 per-step cache policy**。报告:[research/02](research/02-capsule-anatomy-findings.md)
 - [registry agent 引用](tickets/03-registry-agent-ref.md): **路线 A 自建 dispatch**(官方缝+agents 目录+parser 副本,不依赖 registry 挂载);`executor.agent` 引 name;两层解析(load lint+run 时权威重读);契约无 preset 字段避 presentAs 雷;派发走 `startActivation(delivery:'caller')`。报告:[research/03](research/03-registry-agent-ref-findings.md)

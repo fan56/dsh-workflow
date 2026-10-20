@@ -1,5 +1,5 @@
 ---
-status: open
+status: closed
 type: task
 blocked-by: [01-host-primitives.md, 02-capsule-anatomy.md, 03-registry-agent-ref.md, 04-yaml-schema-prototype.md, 05-run-model-governance.md]
 claimed-by: null
@@ -16,3 +16,7 @@ claimed-by: null
 - closed 即到站:任何会话照 spec 直接开工写代码
 
 用户过目拍板后关票(HITL 收尾)。
+
+## Resolution(2026-10-20,closed)
+
+产物:[docs/SPEC.md](../../docs/SPEC.md)(v0.1,buildable)+ [CONTEXT.md](../../CONTEXT.md) 定稿。全部六票决议合成:四层架构(执行/监控/展示/调度)、YAML schema v1 文法+硬规则、registry 引用契约、治理默认表、M1-M4 里程碑、四项实现期待验证项。**到站:任何会话照 SPEC.md 直接开工写代码。**
