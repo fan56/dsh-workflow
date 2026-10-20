@@ -203,3 +203,79 @@ steps:
   assert.equal(outcome.status, 'failed')
   assert.match(outcome.steps.spread.error ?? '', /foreach(\.over unusable| execution is not implemented)/)
 })
+
+class FakeRosterError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'RosterError'
+  }
+}
+
+test('a RosterError fails the step fast — no retry attempts', async () => {
+  const yaml = `format: dsh-workflow
+version: 1
+name: roster
+description: d
+steps:
+  - id: ghost-step
+    executor: { agent: ghost }
+    prompt: p
+    retry: { max: 3 }
+`
+  const { workflow } = loadWorkflow(yaml)
+  const { RosterError } = await import('../lib/errors.js')
+  const calls = []
+  const engine = createEngine({
+    dispatch: async (req) => {
+      calls.push(req)
+      throw new RosterError('unknown agent "ghost"')
+    },
+    sleep: noSleep,
+  })
+  const outcome = await engine.run(workflow)
+  assert.equal(outcome.status, 'failed')
+  assert.equal(outcome.steps['ghost-step'].attempts, 1)
+  assert.equal(calls.length, 1)
+  assert.match(outcome.steps['ghost-step'].error ?? '', /unknown agent/)
+})
+
+test('observers see stepStarted before and stepSettled after every terminal step', async () => {
+  const yaml = `format: dsh-workflow
+version: 1
+name: obs
+description: d
+steps:
+  - id: only
+    executor: { agent: worker }
+    prompt: p
+`
+  const { workflow } = loadWorkflow(yaml)
+  const events = []
+  const engine = createEngine({ dispatch: fakeDispatch(['ok']), sleep: noSleep })
+  await engine.run(workflow, {
+    observers: {
+      stepStarted: (id) => events.push(['started', id]),
+      stepSettled: (o) => events.push(['settled', o.id, o.status, o.usage === undefined ? 'no-usage' : 'usage']),
+    },
+  })
+  assert.deepEqual(events, [['started', 'only'], ['settled', 'only', 'completed', 'no-usage']])
+})
+
+test('dispatch usage lands on the step outcome and renders in the outcome', async () => {
+  const yaml = `format: dsh-workflow
+version: 1
+name: tok
+description: d
+steps:
+  - id: metered
+    executor: { agent: worker }
+    prompt: p
+`
+  const { workflow } = loadWorkflow(yaml)
+  const engine = createEngine({
+    dispatch: async () => ({ text: 'ok', stopReason: 'completed', usage: { inputTokens: 5, outputTokens: 2, totalTokens: 7 } }),
+    sleep: noSleep,
+  })
+  const outcome = await engine.run(workflow)
+  assert.equal(outcome.steps.metered.usage?.totalTokens, 7)
+})

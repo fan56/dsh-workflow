@@ -23,7 +23,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { WorkflowRunError } from './errors.ts'
+import { RosterError } from './errors.ts'
 
 /** Valid frontmatter `thinking` values, in canonical order (registry parity). */
 export const THINKING_LEVELS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const
@@ -181,7 +181,8 @@ export function loadRoster(dir: string): { agents: Map<string, AgentFile>; broke
 /**
  * Call-time authoritative read of one agent (the registry's own convention:
  * the roster is user-owned and editable at runtime, never cached).
- * Throws a roster-aware {@link WorkflowRunError} when the name is unknown.
+ * Throws a roster-aware {@link RosterError} when the name is unknown or the
+ * file is broken — the engine fails the step fast without retrying.
  */
 export function resolveAgent(dir: string, name: string): AgentFile {
   const safeName = /^[\w-]+$/.test(name) ? name : ''
@@ -192,9 +193,9 @@ export function resolveAgent(dir: string, name: string): AgentFile {
   } catch {
     const { agents } = loadRoster(dir)
     const available = [...agents.keys()].sort().join(', ') || '(none)'
-    throw new WorkflowRunError(`unknown agent "${name}" — no ${name}.md in ${dir} (available agents: ${available})`)
+    throw new RosterError(`unknown agent "${name}" — no ${name}.md in ${dir} (available agents: ${available})`)
   }
   const result = parseAgentMarkdown(text, path, name)
-  if (!result.ok) throw new WorkflowRunError(`agent "${name}": ${result.error}`)
+  if (!result.ok) throw new RosterError(`agent "${name}": ${result.error}`)
   return result.agent
 }

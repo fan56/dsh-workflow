@@ -1,8 +1,9 @@
 /**
  * The `/workflow` command — M1 minimal surface: `run`, `list`, `help`.
  * The full command family (runs/show/stop/rerun/resume/prune/save) lands in
- * M3 with the Run Store; this thin slice exists so M1 can smoke-test a real
- * workflow end to end from a live host.
+ * M3 with checkpoint resume; since M2 every `run` also writes the durable
+ * Run Store and projects into the host's `tool-workflow/*` Session events
+ * (the official workflow-run UI node renders them).
  *
  * Registered on the host command registry (global scope) — tui and web both
  * consume that single registry, so this is the tui/web-universal surface
@@ -18,6 +19,10 @@ import { WorkflowLoadError } from './errors.ts'
 import { loadWorkflow } from './loader.ts'
 import { createEngine, type RunOutcome } from './engine.ts'
 import { createDispatch, type DispatchHost } from './dispatch.ts'
+import { installChildCompositionListener } from './composition.ts'
+import { createRunStore } from './run-store.ts'
+import { createRunProjector } from './projection.ts'
+import { defaultAgentsDir } from './roster.ts'
 
 /** Structural view of the host context this module needs (kept minimal on purpose). */
 export interface CommandHost extends DispatchHost {
@@ -42,7 +47,8 @@ function renderOutcome(outcome: RunOutcome): string {
   const lines = [`workflow run ${outcome.runId}: ${outcome.status}`]
   for (const step of Object.values(outcome.steps)) {
     const attempts = step.attempts > 1 ? ` (${step.attempts} attempts)` : ''
-    const suffix = step.status === 'completed' ? attempts : ` — ${step.status}${step.error === undefined ? '' : `: ${step.error}`}`
+    const usage = step.usage === undefined ? '' : ` · ${step.usage.totalTokens} tok`
+    const suffix = step.status === 'completed' ? `${attempts}${usage}` : ` — ${step.status}${step.error === undefined ? '' : `: ${step.error}`}`
     lines.push(`  ${step.id}: ${suffix}`)
     if (step.status === 'completed' && step.output !== undefined && step.output !== '') {
       const preview = step.output.length > 300 ? `${step.output.slice(0, 300)}…` : step.output
@@ -52,7 +58,18 @@ function renderOutcome(outcome: RunOutcome): string {
   return lines.join('\n')
 }
 
+/** Map a subagent stop reason onto the projection's agent-end vocabulary. */
+function agentOutcomeOf(stopReason: string): 'completed' | 'failed' | 'cancelled' {
+  if (stopReason === 'completed') return 'completed'
+  if (stopReason === 'aborted') return 'cancelled'
+  return 'failed'
+}
+
 export function registerWorkflowCommand(host: CommandHost): void {
+  // One listener for the whole plugin: parks the persona/leaf composition at
+  // dispatch and installs it on each child scope at the start edge.
+  host.effect(() => installChildCompositionListener(host))
+
   host.effect(() => host.commands.register({
     name: 'workflow',
     description: 'Run and inspect declarative YAML workflows (dsh-workflow plugin)',
@@ -67,7 +84,7 @@ export function registerWorkflowCommand(host: CommandHost): void {
       }
 
       if (sub === 'list') {
-        const dir = rest[0] !== undefined && rest[0] !== '' ? resolvePath(rest[0]!) : (cwd ?? process.cwd())
+        const dir = rest[0] !== undefined && rest[0] !== '' ? resolvePath(rest[0]!) : cwd
         let entries: string[]
         try {
           entries = readdirSync(dir)
@@ -89,7 +106,7 @@ export function registerWorkflowCommand(host: CommandHost): void {
       if (sub === 'run') {
         const file = rest[0]
         if (file === undefined || file === '') return { kind: 'error', text: 'run needs a file: /workflow run <file.workflow.yaml> [json-args]' }
-        const path = resolvePath(cwd ?? process.cwd(), file)
+        const path = resolvePath(cwd, file)
         let text: string
         try {
           text = readFileSync(path, 'utf8')
@@ -109,10 +126,36 @@ export function registerWorkflowCommand(host: CommandHost): void {
         try {
           const { workflow } = loadWorkflow(text, { filePath: file })
           const runId = Math.random().toString(36).slice(2, 10)
+          const store = createRunStore({ runId, root: cwd })
+          const projector = createRunProjector(invocation.agent.session as unknown as Parameters<typeof createRunProjector>[0], { runId })
+          store.begin(workflow, text)
+          projector.runStarted(workflow.name)
           // Per-run dispatch: every child is attributed to the invoking agent
-          // (the seam requires parent to be the exact live Agent).
-          const engine = createEngine({ dispatch: createDispatch(host, { parent: invocation.agent, runId, stepId: '*' }) })
-          const outcome = await engine.run(workflow, { inputs, runId, signal: invocation.signal })
+          // (the seam requires parent to be the exact live Agent), carries the
+          // roster persona at the start edge, and reports child edges so the
+          // projection's agent-start/agent-end pairs stay exact.
+          const engine = createEngine({
+            dispatch: createDispatch(host, {
+              parent: invocation.agent,
+              runId,
+              agentsDir: defaultAgentsDir(),
+              events: {
+                childStarted: (childId, label) => projector.agentStarted(label, String(childId)),
+                childSettled: (childId, stopReason) => projector.agentEnded(agentOutcomeOf(stopReason)),
+              },
+            }),
+          })
+          const outcome = await engine.run(workflow, {
+            inputs,
+            runId,
+            signal: invocation.signal,
+            observers: {
+              stepStarted: (stepId) => store.stepStarted(stepId),
+              stepSettled: (step: Parameters<typeof store.stepSettled>[1]) => store.stepSettled(step.id, step),
+            },
+          })
+          store.finish({ status: outcome.status, steps: outcome.steps })
+          projector.runFinished(outcome.status === 'completed' ? 'completed' : 'error')
           return { kind: outcome.status === 'completed' ? 'success' : 'error', text: renderOutcome(outcome) }
         } catch (error) {
           if (error instanceof WorkflowLoadError) return { kind: 'error', text: error.message }

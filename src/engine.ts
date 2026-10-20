@@ -12,15 +12,18 @@
  * @module @aiwayds/dsh-workflow/engine
  */
 
-import { WorkflowRunError } from './errors.ts'
+import { WorkflowRunError, RosterError } from './errors.ts'
 import { resolveOverArray, resolveTemplate, type RefScope } from './refs.ts'
 import { isForeachStep, type AnyStepDef, type StepDef, type WorkflowDef } from './types.ts'
+import type { UsageSummary } from './cost.ts'
 
 /** What one dispatch attempt must produce. Mirrors the host's SubagentResult shape. */
 export interface DispatchOutcome {
   text: string
   structured?: unknown
   stopReason: string
+  /** Folded from the child's own Session log (best-effort; wayfinder ticket 01). */
+  usage?: UsageSummary
 }
 
 export interface DispatchRequest {
@@ -46,6 +49,8 @@ export interface StepOutcome {
   actionOutput?: unknown
   error?: string
   attempts: number
+  /** Folded per-child token/model usage (present when the cost fold succeeded). */
+  usage?: UsageSummary
 }
 
 export interface RunOutcome {
@@ -60,6 +65,15 @@ export interface RunOptions {
   signal?: AbortSignal
   /** Called before a `confirm: true` step dispatches; false skips the step. */
   confirm?: (stepId: string) => Promise<boolean>
+  /**
+   * Monitoring hooks for the Run Store and Session projection. Observers
+   * must be self-contained (they own their failure policy — the engine calls
+   * them bare; see run-store/projection for warn-and-degrade implementations).
+   */
+  observers?: {
+    stepStarted?(stepId: string): void
+    stepSettled?(outcome: StepOutcome): void
+  }
 }
 
 const DEFAULT_MAX_CONCURRENCY = 4
@@ -184,9 +198,12 @@ export function createEngine(options: EngineOptions): Engine {
         outcome.status = 'completed'
         outcome.output = result.text
         outcome.structured = result.structured
+        if (result.usage !== undefined) outcome.usage = result.usage
         return outcome
       } catch (error) {
         outcome.error = error instanceof Error ? error.message : String(error)
+        // A roster miss re-reads to the same answer — retrying is pure waste.
+        if (error instanceof RosterError) break
         if (attempt > maxRetries) break
         if (backoffMs > 0) await sleep(backoffMs)
       }
@@ -212,6 +229,7 @@ export function createEngine(options: EngineOptions): Engine {
         const outcome: StepOutcome = { id, status: 'completed', attempts: 0 }
         steps[id] = outcome
         scope.steps[id] = { get output() { return outcome.output }, get 'action-output'() { return outcome.actionOutput } }
+        runOptions.observers?.stepStarted?.(id)
 
         if (isForeachStep(step)) {
           // Validate the `over` array eagerly when it is already materialized;
@@ -222,6 +240,7 @@ export function createEngine(options: EngineOptions): Engine {
           outcome.error = resolved.ok
             ? `foreach execution is not implemented until M3 (array with ${resolved.items.length} items resolved fine)`
             : `foreach.over unusable: ${resolved.reason}`
+          runOptions.observers?.stepSettled?.(outcome)
           continue
         }
 
@@ -234,6 +253,7 @@ export function createEngine(options: EngineOptions): Engine {
         if (skippedDep !== undefined) {
           outcome.status = 'skipped'
           outcome.error = `dependency "${skippedDep}" was skipped`
+          runOptions.observers?.stepSettled?.(outcome)
           continue
         }
 
@@ -242,6 +262,7 @@ export function createEngine(options: EngineOptions): Engine {
           if (!granted) {
             outcome.status = 'skipped'
             outcome.error = 'confirmation declined'
+            runOptions.observers?.stepSettled?.(outcome)
             continue
           }
         }
@@ -251,6 +272,7 @@ export function createEngine(options: EngineOptions): Engine {
         if (outcome.status === 'failed') {
           const onError = step['on-error'] ?? 'fail'
           if (onError === 'fail') {
+            runOptions.observers?.stepSettled?.(outcome)
             return { runId, status: 'failed', steps }
           }
           if (onError === 'skip') {
@@ -258,6 +280,7 @@ export function createEngine(options: EngineOptions): Engine {
           }
           // `continue` keeps the failed state and lets dependents see it.
         }
+        runOptions.observers?.stepSettled?.(outcome)
       }
 
       return { runId, status: Object.values(steps).every((s) => s.status === 'completed') ? 'completed' : 'failed', steps }

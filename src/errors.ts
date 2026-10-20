@@ -32,3 +32,15 @@ export class WorkflowRunError extends Error {
     this.name = 'WorkflowRunError'
   }
 }
+
+/**
+ * Thrown when a step's roster agent cannot be resolved at dispatch time.
+ * The engine treats this as fail-fast: re-reading a missing file will not
+ * heal, so retrying is pure waste (wayfinder ticket 03, two-layer resolution).
+ */
+export class RosterError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RosterError'
+  }
+}

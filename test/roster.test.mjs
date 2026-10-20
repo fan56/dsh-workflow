@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const { parseAgentMarkdown, loadRoster, resolveAgent, defaultAgentsDir } = await import('../lib/roster.js')
-const { WorkflowRunError } = await import('../lib/errors.js')
+const { RosterError } = await import('../lib/errors.js')
 
 function makeAgent(overrides = {}, body = 'Persona body.\n') {
   const keys = { name: 'worker', deep: '1', display_name: 'Worker', description: 'does things', model: 'prov/model', thinking: 'high', background: 'false', maxRounds: '8', ...overrides }
@@ -75,9 +75,9 @@ test('loadRoster reports broken files without dying; resolveAgent is roster-awar
     assert.equal(resolveAgent(dir, 'good').meta.name, 'good')
     try {
       resolveAgent(dir, 'ghost')
-      assert.fail('expected WorkflowRunError')
+      assert.fail('expected RosterError')
     } catch (error) {
-      assert.ok(error instanceof WorkflowRunError)
+      assert.ok(error instanceof RosterError)
       assert.match(error.message, /available agents: good/)
     }
   } finally {
