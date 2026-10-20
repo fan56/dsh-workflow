@@ -30,6 +30,9 @@
 
 <!-- 每关一张票在此加一行: [票名](tickets/xx.md): 一句话答案 -->
 
+- [社区 capsule 解剖](tickets/02-capsule-anatomy.md): 借鉴=白名单 fail-loud schema/run store 布局/官方 Session 事件复用(turn:null)/缓存质量门槛;避开=QuickJS 层与调用序号 effect cache,改**稳定 step id 键+显式 per-step cache policy**。报告:[research/02](research/02-capsule-anatomy-findings.md)
+- [registry agent 引用](tickets/03-registry-agent-ref.md): **路线 A 自建 dispatch**(官方缝+agents 目录+parser 副本,不依赖 registry 挂载);`executor.agent` 引 name;两层解析(load lint+run 时权威重读);契约无 preset 字段避 presentAs 雷;派发走 `startActivation(delivery:'caller')`。报告:[research/03](research/03-registry-agent-ref-findings.md)
+
 ## Not yet specified
 
 - tui 常驻面板:run graph 实时显示(activity panel 同款套路)——等命令族落地后看真实痛点再立
