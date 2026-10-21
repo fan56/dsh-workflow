@@ -40,6 +40,7 @@
 ## Not yet specified
 
 - tui 常驻面板:run graph 实时显示(activity panel 同款套路)——等命令族落地后看真实痛点再立
+  - 事实修正(2026-10-21):官方 workflow-run 折叠节点是 **web 独有**(dsh-client-ui-workflow-run,platform=web);tui-pi 不渲染 tool-workflow/* log-only 事件,tui 当前可见性=命令受理文本+job ring 行+/workflow show。tui 的 run 可视化要么 tui-pi 加节点消费,要么常驻面板——两案待雾里定;web 渲染尚未眼验(只验了事件落日志)
 - 调度层细则:cron→workflow 的调用约定形态、触发器语义(委托 dsh-cron 已定,约定未定)
 - feishu 通知缝:run 终态推送的事件口最终形态
 - workflow 版本化与 revise:保存后的 workflow 怎么修订、旧 run 引用哪个版本
