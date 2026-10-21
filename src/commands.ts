@@ -341,7 +341,10 @@ export function registerWorkflowCommand(host: CommandHost): void {
         }
 
         try {
-          const { workflow } = loadWorkflow(workflowText, { filePath: sub === 'run' ? target : `${sub}:${target}` })
+          // The name/stem interlock is for user-edited files (the run
+          // branch). resume/rerun load the system-written snapshot — no stem
+          // to interlock against (real-host verified failure).
+          const { workflow } = loadWorkflow(workflowText, sub === 'run' ? { filePath: target } : {})
           return await executeRun(invocation, { workflow, yamlText: workflowText, inputs, wait, prior })
         } catch (error) {
           if (error instanceof WorkflowLoadError) return { kind: 'error', text: error.message }
