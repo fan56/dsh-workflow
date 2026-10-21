@@ -43,3 +43,22 @@ B. **常驻面板**:activity panel 套路的 workflow 面板(活动 run graph)�
 - **数据源零新协议**:图=cwd 下 run store 的 workflow.yaml 快照,直接 import 同 profile 的 @aiwayds/dsh-workflow `loadWorkflow`(纯函数);执行态=session fold(agentViews,已有)+run.json 尾随
 - **落点**:tui-pi 仓 src/workflow-widget.ts + todosDoc 第四槽 + Ctrl+W(占位)
 - **实施注意**:本插件 run-store 的 run.json 需在 begin 落 name(YAML 快照旁);foreach 子步 id 含 `#`,渲染层按 `#` 折叠
+
+## Amendment(2026-10-21,架构反转——用户拍板)
+
+Widget 所有权归 **dsh-workflow 插件**,不在 tui-pi 硬编码。dsh-workflow 启动时
+检测用户是否装了 tui-pi(检测方式=tui-pi 暴露的通用 widget 缝服务是否存在),
+装了就注册 widget,没装就静默(命令族照用)。功能跟着能力走,tui-pi 保持通用。
+
+**tui-pi 侧(通用缝,零 workflow 知识)**:新服务 `tuiWidgets`(cordis augmentation):
+`register({ id, mini(): string[]|null, overlay?: { title, render(w,h): string[], onKey, close } })`;
+todosDoc 渲染循环改遍历注册表(现有三面板成为注册表头三目);overlay 行数组协议
+→ dsh-workflow 零 pi-tui 依赖。
+
+**dsh-workflow 侧(widget 全量)**:`src/tui-widget.ts`——检测服务→注册
+mini(单行)+graph overlay(分层 DAG 文本图+漫游+步详情)。数据全自持:
+自家 Run Store 的 workflow.yaml(loadWorkflow 直调,不再跨包 import)+
+自家事件订阅+自家 run.json 成本。
+**时序**:bundles 树序 tui-pi 在前;保险=服务未就绪挂 added 类事件等一步(registry provider-added 先例)。
+
+**分工**:tui-pi 开缝(小,通用资产)→ dsh-workflow 写 widget(大,本仓所有权)。
