@@ -107,3 +107,21 @@ cordis 作用域三墙(踩雷账补全):读守卫(inject)、写守卫(provide)�
 状态符 ○/▶/✅/↻/✗/⏭/?/🔒;foreach `▦ m/n` 聚合可展开;执行点高亮+自动跟随
 (`f` 锁/解锁);`←→` 折叠/展开子树;`Enter` 步详情(输出/错误/重试/usage);
 Mini 行不变。数据源不变(workflow.yaml 快照 + run.json + 事件 fold)。
+
+## Design v3(2026-10-21,用户定调:widget 分 tab,tab=阶段,powerline 箭头段)
+
+**三级信息分层**:powerline 段行(阶段进度一眼全局)→ 当前段内树(细节)→
+Enter 步详情。分段解决长树滚动:每段一棵小树。
+
+- **段=tab**:powerline 三角衔接(视觉沿用 pi-powerline-footer 的段色);段状态
+  ✅ 完成(收暗)/ ▶ 当前(高亮反色+段内计数 `2/3`)/ 未到(dim)
+- **数据源(schema v1.1 小扩展,向后兼容)**:Step 加可选 `phase: <title>` 纯标注
+  (执行语义零改动);`meta.phases` 顺序=tab 顺序;未标 phase 的步归"─ 未分组 ─"
+  尾段;**未声明 phases 的 workflow 退回 v2 单树**(分阶段 opt-in)
+- **自动跟随**:执行点跨段时自动切 tab(f 锁/解锁);每段记住自己的树滚动位置
+- **键位**:Tab/Shift+Tab 切段 · ↑↓ 滚动 · ←→ 折叠子树 · Enter 步详情 · q 关
+- Mini 行不变;实现落点不变(dsh-workflow 拥有 widget,tui-pi 文件缝渲染协议
+  需同步升级:文件从"行数组"改为"段结构"?——不,渲染逻辑在 dsh-workflow,
+  写入文件的是**渲染产物**;tab 树的 overlay 交互(切段/滚动/折叠)需要键盘与
+  视口状态,纯行文件不够——**overlay 二期实现时按 v3 设计走**,mini 行文件缝
+  维持现状
