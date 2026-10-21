@@ -10,6 +10,9 @@
  * @module @aiwayds/dsh-workflow/tui-widget
  */
 
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { homedir } from 'node:os'
 import { snapshotWidgetRuns, type WidgetRunState } from './run-state.ts'
 
 /** Visible-width clip: CJK/fullwidth counts double so the line never wraps. */
@@ -66,22 +69,50 @@ function donePart(status: WidgetRunState['status'], total: number, completed: nu
   return bits.join(' ')
 }
 
-/** Structural view of the seam this module detects and registers into. */
-interface TuiWidgetsSeam {
-  register(widget: { id: string; render(width: number): string[] }): unknown
+const WIDGET_GRACE_MS = 60_000
+
+/** The widget lines file: `$DSH_HOME/tui-widgets/dsh-workflow.lines`. */
+export function widgetFile(): string {
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  return join(home, 'tui-widgets', 'dsh-workflow.lines')
 }
 
+let clearTimer: ReturnType<typeof setTimeout> | undefined
+
 /**
- * Detect the generic widget seam and register this plugin's widget.
- * Absent seam (no tui-pi installed) = a silent no-op: the command family
- * is the product, the widget is presence, never a requirement.
+ * Write the current mini lines into the widget file — the generic file seam
+ * (@aiwayds/dsh-tui-pi renders every `$DSH_HOME/tui-widgets/*.lines`; the
+ * writer owns content and timing, the reader is a dumb line renderer).
+ * Best-effort on every leg. Called from the command path on every
+ * run/step state change; a settled run schedules one final clear after the
+ * grace window so a finished workflow does not linger forever.
  */
-export function installTuiWidget(context: unknown): void {
+export function flushWidgetFile(): void {
+  const lines = renderMini(500)
   try {
-    const widgets = (context as { tuiWidgets?: TuiWidgetsSeam }).tuiWidgets
-    if (widgets === undefined || typeof widgets.register !== 'function') return
-    widgets.register({ id: 'dsh-workflow', render: (width: number) => renderMini(width) })
+    mkdirSync(dirname(widgetFile()), { recursive: true })
+    if (lines.length === 0) rmSync(widgetFile(), { force: true })
+    else writeFileSync(widgetFile(), `${lines.join('\n')}\n`)
   } catch {
-    /* presence must never break plugin load */
+    /* presence must never touch the run */
   }
+  const hasVisibleSettled = snapshotWidgetRuns().some((run) => run.settledAt !== undefined)
+  const anyRunning = snapshotWidgetRuns().some((run) => run.status === 'running')
+  if (hasVisibleSettled && !anyRunning) {
+    if (clearTimer !== undefined) clearTimeout(clearTimer)
+    clearTimer = setTimeout(() => {
+      clearTimer = undefined
+      flushWidgetFile()
+    }, WIDGET_GRACE_MS + 500)
+    clearTimer.unref?.()
+  } else if (clearTimer !== undefined && anyRunning) {
+    clearTimeout(clearTimer)
+    clearTimer = undefined
+  }
+}
+
+/** Test escape hatch: drop the pending clear timer. */
+export function cancelWidgetClearTimer(): void {
+  if (clearTimer !== undefined) clearTimeout(clearTimer)
+  clearTimer = undefined
 }

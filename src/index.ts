@@ -15,7 +15,6 @@
  */
 
 import { registerWorkflowCommand, type CommandHost } from './commands.ts'
-import { installTuiWidget } from './tui-widget.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'dsh-workflow'
@@ -34,10 +33,6 @@ export function apply(context: CommandHost): void {
   // The command handler assembles its own engine per run (dispatch needs the
   // invoking agent as the children's parent), so plugin setup is one row.
   registerWorkflowCommand(context)
-  // Presence bonus: register the tui widget when a compatible tui (the
-  // generic ctx.tuiWidgets seam, shipped by @aiwayds/dsh-tui-pi) is present.
-  // Silent no-op otherwise — the widget is never a requirement.
-  installTuiWidget(context)
 }
 
 export { loadWorkflow } from './loader.ts'
@@ -48,7 +43,7 @@ export { installChildCompositionListener, reserveChildComposition } from './comp
 export { foldChildUsage } from './cost.ts'
 export { createRunStore } from './run-store.ts'
 export { createRunProjector } from './projection.ts'
-export { installTuiWidget, renderMini } from './tui-widget.ts'
+export { flushWidgetFile, renderMini, widgetFile } from './tui-widget.ts'
 export { widgetRunStarted, widgetStepUpdate, widgetRunSettled, snapshotWidgetRuns } from './run-state.ts'
 export { WorkflowLoadError, WorkflowRunError, RosterError } from './errors.ts'
 export type {

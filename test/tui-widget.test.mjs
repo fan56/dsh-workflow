@@ -3,10 +3,14 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const { renderMini, installTuiWidget } = await import('../lib/tui-widget.js')
 const { widgetRunStarted, widgetStepUpdate, widgetRunSettled, snapshotWidgetRuns, resetWidgetRuns } =
   await import('../lib/run-state.js')
+const { cancelWidgetClearTimer } = await import('../lib/tui-widget.js')
 
 test('no active runs renders nothing (the dock hides the widget)', () => {
   resetWidgetRuns()
@@ -60,19 +64,34 @@ test('wide CJK names are clipped to the terminal width, never wrapped', () => {
   assert.ok(lines[0].length < 60, `line too long: ${lines[0].length}`)
 })
 
-test('installTuiWidget registers into a present seam and silences on an absent one', () => {
+test('flushWidgetFile writes the widget lines under $DSH_HOME', async () => {
   resetWidgetRuns()
-  const registered = []
-  const seam = { register: (w) => registered.push(w) }
-  installTuiWidget({ tuiWidgets: seam })
-  assert.equal(registered.length, 1)
-  assert.equal(registered[0].id, 'dsh-workflow')
-  // The registered renderer is live: feed a run, read it back through the seam.
-  widgetRunStarted('r5', 'seamcheck')
-  assert.match(registered[0].render(120)[0], /seamcheck/)
+  const home = mkdtempSync(join(tmpdir(), 'wf-wdg-'))
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    const { flushWidgetFile, widgetFile } = await import('../lib/tui-widget.js')
+    widgetRunStarted('r9', 'fan')
+    widgetStepUpdate('r9', 'seed', 'completed', 14793)
+    widgetStepUpdate('r9', 'adapt#1', 'running')
+    flushWidgetFile()
+    const content = readFileSync(widgetFile(), 'utf8')
+    assert.match(content, /▸ workflow: fan/)
+    assert.match(content, /1\/2 ▶1/)
+    assert.match(content, /14\.8k tok/)
 
-  // Absent seam: a silent no-op (no throw, nothing registered).
-  assert.doesNotThrow(() => installTuiWidget(undefined))
-  assert.doesNotThrow(() => installTuiWidget({}))
-  resetWidgetRuns()
+    // A settled run with no other activity: one final flush after the grace
+    // window clears the file (the timer is unref'd; we drive it manually).
+    widgetRunSettled('r9', 'completed')
+    flushWidgetFile()
+    assert.ok(existsSync(widgetFile()))
+    resetWidgetRuns()
+    flushWidgetFile()
+    assert.equal(existsSync(widgetFile()), false)
+  } finally {
+    cancelWidgetClearTimer()
+    if (oldHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = oldHome
+    rmSync(home, { recursive: true, force: true })
+  }
 })

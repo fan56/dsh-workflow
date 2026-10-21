@@ -28,6 +28,7 @@ import { createRunStore, listRuns, loadRun, pruneRuns } from './run-store.ts'
 import { createRunProjector } from './projection.ts'
 import { defaultAgentsDir } from './roster.ts'
 import { widgetRunSettled, widgetRunStarted, widgetStepUpdate } from './run-state.ts'
+import { flushWidgetFile } from './tui-widget.ts'
 
 /** Structural view of the jobs registry (the shape executeRun uses). */
 export interface JobsHost {
@@ -148,6 +149,7 @@ export function registerWorkflowCommand(host: CommandHost): void {
       projector.runFinished(outcome.status === 'completed' ? 'completed' : 'error')
       activeRuns.delete(runId)
       widgetRunSettled(runId, outcome.status)
+      flushWidgetFile()
     }
 
     const promise = engine.run(workflow, {
@@ -164,10 +166,12 @@ export function registerWorkflowCommand(host: CommandHost): void {
         stepStarted: (stepId) => {
           store.stepStarted(stepId)
           widgetStepUpdate(runId, stepId, 'running')
+          flushWidgetFile()
         },
         stepSettled: (step) => {
           store.stepSettled(step.id, step)
           widgetStepUpdate(runId, step.id, step.status, step.usage?.totalTokens)
+          flushWidgetFile()
           jobLine?.(`${step.id}: ${step.status}${step.usage !== undefined ? ` · ${step.usage.totalTokens} tok` : ''}`)
         },
       },
