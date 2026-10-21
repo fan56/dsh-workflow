@@ -113,8 +113,8 @@ Mini 行不变。数据源不变(workflow.yaml 快照 + run.json + 事件 fold)�
 **三级信息分层**:powerline 段行(阶段进度一眼全局)→ 当前段内树(细节)→
 Enter 步详情。分段解决长树滚动:每段一棵小树。
 
-- **段=tab**:powerline 三角衔接(视觉沿用 pi-powerline-footer 的段色);段状态
-  ✅ 完成(收暗)/ ▶ 当前(高亮反色+段内计数 `2/3`)/ 未到(dim)
+- **段=tab**:powerline 三角衔接;**段不着色**(用户定调,无背景色块/反色)——
+  状态全靠符号:✅ 完成 / ▶ 当前(+段内计数 `2/3`)/ ○ 未到,视觉即符号本身
 - **数据源(schema v1.1 小扩展,向后兼容)**:Step 加可选 `phase: <title>` 纯标注
   (执行语义零改动);`meta.phases` 顺序=tab 顺序;未标 phase 的步归"─ 未分组 ─"
   尾段;**未声明 phases 的 workflow 退回 v2 单树**(分阶段 opt-in)
