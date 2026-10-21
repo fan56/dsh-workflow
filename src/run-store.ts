@@ -30,6 +30,7 @@ export type RunStoreEventType =
   | 'step-completed'
   | 'step-failed'
   | 'step-skipped'
+  | 'step-child'
 
 // `#` is legal: foreach child checkpoints are named <foreachId>#<index>.
 const SAFE_ID = /^[a-z0-9][a-z0-9#-]{0,63}$/
@@ -46,6 +47,8 @@ export interface RunStore {
   /** Snapshot the definition and open the run. Idempotent per store instance. */
   begin(workflow: WorkflowDef, yamlText?: string, inputs?: Record<string, unknown>): void
   stepStarted(stepId: string): void
+  /** Bind the child session id a step dispatched (evidence for L1 repair). */
+  bindChild(stepId: string, childId: string): void
   stepSettled(stepId: string, outcome: StepOutcome): void
   /** Write the terminal snapshot. `finish` is terminal — later writes are dropped. */
   finish(outcome: { status: 'completed' | 'failed'; steps: Record<string, StepOutcome>; cost?: unknown }): void
@@ -65,7 +68,7 @@ export function createRunStore(options: RunStoreOptions): RunStore {
   let finished = false
   let inputsSnapshot: Record<string, unknown> | undefined
   let eventSeq = 0
-  const stepsSnapshot: Record<string, { status: string; attempts: number; error?: string; output?: string }> = {}
+  const stepsSnapshot: Record<string, { status: string; attempts: number; error?: string; output?: string; childId?: string }> = {}
 
   function safeWrite(label: string, write: () => void): void {
     if (finished && label !== 'finish') return
@@ -113,6 +116,13 @@ export function createRunStore(options: RunStoreOptions): RunStore {
       stepsSnapshot[stepId] = { status: 'running', attempts: 0 }
       appendEvent('step-started', { stepId })
       writeRunJson('running')
+    },
+    bindChild(stepId, childId) {
+      if (!SAFE_ID.test(stepId)) return
+      const entry = stepsSnapshot[stepId]
+      if (entry === undefined) return
+      entry.childId = childId
+      appendEvent('step-child', { stepId, childId })
     },
     stepSettled(stepId, outcome) {
       if (!SAFE_ID.test(stepId)) return
@@ -200,6 +210,7 @@ export function loadRun(root: string, runId: string, warn?: (m: string) => void)
         id: stepId,
         status: (full['status'] as StepOutcome['status'] ?? 'failed'),
         attempts: (full['attempts'] as number ?? 1),
+        ...(typeof full['childId'] === 'string' ? { childId: full['childId'] } : {}),
         ...(typeof full['output'] === 'string' ? { output: full['output'] } : {}),
         ...(full['structured'] !== undefined ? { structured: full['structured'] } : {}),
         ...(full['actionOutput'] !== undefined ? { actionOutput: full['actionOutput'] } : {}),

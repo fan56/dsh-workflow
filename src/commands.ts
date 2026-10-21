@@ -137,7 +137,10 @@ export function registerWorkflowCommand(host: CommandHost): void {
         runId,
         agentsDir: defaultAgentsDir(),
         events: {
-          childStarted: (childId, label) => projector.agentStarted(label, String(childId)),
+          childStarted: (childId, label) => {
+            store.bindChild(label, String(childId))
+            projector.agentStarted(label, String(childId))
+          },
           childSettled: (_childId, stopReason) => projector.agentEnded(agentOutcomeOf(stopReason)),
         },
       }),

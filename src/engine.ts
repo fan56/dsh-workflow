@@ -53,6 +53,8 @@ export interface StepOutcome {
   usage?: UsageSummary
   /** True when this outcome was replayed from a prior run's checkpoint, not re-executed. */
   replayed?: boolean
+  /** The child session this step dispatched (bound at dispatch; L1 repair evidence). */
+  childId?: string
 }
 
 export interface RunOutcome {
