@@ -33,6 +33,24 @@ export function apply(context: CommandHost): void {
   // The command handler assembles its own engine per run (dispatch needs the
   // invoking agent as the children's parent), so plugin setup is one row.
   registerWorkflowCommand(context)
+  // Model guidance: without this section the model has no idea the plugin
+  // exists — user requests like "给我创建一个 workflow" get hijacked by
+  // whatever other workflow skill is installed (real-tui verified). Keep it
+  // short: route the intent, sketch the schema, hand off to /workflow.
+  context.effect(() => {
+    const disposer = context.systemPrompt.section({
+    name: 'dsh-workflow:usage',
+    text: [
+      '## dsh-workflow (durable YAML workflows)',
+      'The /workflow command family runs DECLARATIVE YAML workflows that fan out subagents — durable, resumable pipelines (release waves, research sweeps, recurring checks).',
+      '- When the user asks to CREATE a workflow ("建一个 workflow 搜集…", "make a pipeline that…"), WRITE a `<name>.workflow.yaml` file in the workspace, then tell the user to run it with `/workflow run <file>`. Do not invent other mechanisms.',
+      '- Schema: top-level `format: dsh-workflow`, `version: 1`, `name` (kebab-case = file stem), `description`, optional `inputs`/`phases`; `steps[]` each with `id`, `executor.agent` (a name from ~/.dsh/agents/*.md), `prompt` (may use {{inputs.x}} / {{steps.<id>.output.path}}), optional `needs`, `foreach` (over/as/max-concurrency/step), `retry`, `on-error` (fail|skip|continue), `cache` (always|on-failure|never), `confirm`, `phase`, `output` (object JSON-schema), `acceptance`, `action` (pure per-step JS).',
+      '- Hard rules: YAML declares structure; JS only inside one step action; unknown keys are errors. Run `/workflow help` for the family; full spec in the dsh-workflow repo docs/SPEC.md.',
+      '- One-off delegation (a single subagent task) stays on the plain subagent tool — workflows are for durable, repeatable pipelines.',
+    ].join('\n'),
+    })
+    return typeof disposer === 'function' ? () => { (disposer as () => void)() } : () => {}
+  })
 }
 
 export { loadWorkflow } from './loader.ts'

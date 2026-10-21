@@ -49,6 +49,10 @@ export interface JobsHost {
 export interface CommandHost extends DispatchHost, JobsHost {
   /** Register a disposer-scoped effect (cordis lifecycle). */
   effect(fn: () => () => void): void
+  /** Register a system-prompt section (model guidance). */
+  systemPrompt: {
+    section(section: { name: string; text: string; order?: number }): unknown
+  }
   commands: {
     register(definition: {
       name: string
