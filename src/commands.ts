@@ -1,9 +1,13 @@
 /**
- * The `/workflow` command — M1 minimal surface: `run`, `list`, `help`.
- * The full command family (runs/show/stop/rerun/resume/prune/save) lands in
- * M3 with checkpoint resume; since M2 every `run` also writes the durable
- * Run Store and projects into the host's `tool-workflow/*` Session events
- * (the official workflow-run UI node renders them).
+ * The `/workflow` command family (M3): run/resume/rerun/stop in the
+ * foreground or as background `ctx.jobs` jobs, plus runs/show/prune over the
+ * Run Store.
+ *
+ * Semantics (docs/SPEC.md §4 governance): run/resume/rerun default to
+ * background (immediately return the run id + job id); `--wait` blocks and
+ * renders the outcome. A `confirm: true` step only confirms in `--wait`
+ * mode — in a background job it is skipped with an explicit error, never
+ * silently approved.
  *
  * Registered on the host command registry (global scope) — tui and web both
  * consume that single registry, so this is the tui/web-universal surface
@@ -17,15 +21,30 @@ import { join, resolve as resolvePath } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { WorkflowLoadError } from './errors.ts'
 import { loadWorkflow } from './loader.ts'
-import { createEngine, type RunOutcome } from './engine.ts'
+import { createEngine, type RunOutcome, type StepOutcome } from './engine.ts'
 import { createDispatch, type DispatchHost } from './dispatch.ts'
 import { installChildCompositionListener } from './composition.ts'
-import { createRunStore } from './run-store.ts'
+import { createRunStore, listRuns, loadRun, pruneRuns } from './run-store.ts'
 import { createRunProjector } from './projection.ts'
 import { defaultAgentsDir } from './roster.ts'
 
-/** Structural view of the host context this module needs (kept minimal on purpose). */
-export interface CommandHost extends DispatchHost {
+/** Structural view of the jobs registry (the shape executeRun uses). */
+export interface JobsHost {
+  jobs: {
+    start(spec: {
+      kind: string
+      label: string
+      owner?: string
+      run(handle: { append(line: string): void }): {
+        cancel(): void
+        done: Promise<{ status: 'completed' | 'killed' | 'failed'; detail?: string; result?: string }>
+      }
+    }): string
+  }
+}
+
+/** Structural view of the host context this module needs. */
+export interface CommandHost extends DispatchHost, JobsHost {
   /** Register a disposer-scoped effect (cordis lifecycle). */
   effect(fn: () => () => void): void
   commands: {
@@ -38,17 +57,36 @@ export interface CommandHost extends DispatchHost {
   }
 }
 
+interface ActiveRun {
+  abort: AbortController
+  name: string
+  jobId?: string
+}
+
 const HELP = `usage:
-  /workflow run <file.workflow.yaml> [json-args]
-  /workflow list [dir]
+  /workflow run <file.workflow.yaml> [json-args] [--wait]
+  /workflow resume <runId> [--wait]     checkpoint resume (completed steps replay, cache:never re-runs)
+  /workflow rerun <runId> [--wait]      fresh run of a stored workflow with its original inputs
+  /workflow runs [limit]                list recent runs
+  /workflow show <runId>                render one run's steps, usage, and errors
+  /workflow stop [runId]                stop the active (or named) background run
+  /workflow prune [--keep N]            delete terminal runs beyond the newest N (default 100)
+  /workflow list [dir]                  list *.workflow.yaml files
   /workflow help`
+
+function agentOutcomeOf(stopReason: string): 'completed' | 'failed' | 'cancelled' {
+  if (stopReason === 'completed') return 'completed'
+  if (stopReason === 'aborted') return 'cancelled'
+  return 'failed'
+}
 
 function renderOutcome(outcome: RunOutcome): string {
   const lines = [`workflow run ${outcome.runId}: ${outcome.status}`]
   for (const step of Object.values(outcome.steps)) {
+    const replayed = step.replayed === true ? ' (replayed)' : ''
     const attempts = step.attempts > 1 ? ` (${step.attempts} attempts)` : ''
     const usage = step.usage === undefined ? '' : ` · ${step.usage.totalTokens} tok`
-    const suffix = step.status === 'completed' ? `${attempts}${usage}` : ` — ${step.status}${step.error === undefined ? '' : `: ${step.error}`}`
+    const suffix = step.status === 'completed' ? `${replayed}${attempts}${usage}` : ` — ${step.status}${step.error === undefined ? '' : `: ${step.error}`}`
     lines.push(`  ${step.id}: ${suffix}`)
     if (step.status === 'completed' && step.output !== undefined && step.output !== '') {
       const preview = step.output.length > 300 ? `${step.output.slice(0, 300)}…` : step.output
@@ -58,11 +96,8 @@ function renderOutcome(outcome: RunOutcome): string {
   return lines.join('\n')
 }
 
-/** Map a subagent stop reason onto the projection's agent-end vocabulary. */
-function agentOutcomeOf(stopReason: string): 'completed' | 'failed' | 'cancelled' {
-  if (stopReason === 'completed') return 'completed'
-  if (stopReason === 'aborted') return 'cancelled'
-  return 'failed'
+function renderRunRow(row: { runId: string; status: string; name?: string; finishedAt?: string }): string {
+  return `  ${row.runId}  ${row.status.padEnd(9)}  ${row.name ?? '?'}${row.finishedAt !== undefined ? `  (${row.finishedAt})` : ''}`
 }
 
 export function registerWorkflowCommand(host: CommandHost): void {
@@ -70,21 +105,130 @@ export function registerWorkflowCommand(host: CommandHost): void {
   // dispatch and installs it on each child scope at the start edge.
   host.effect(() => installChildCompositionListener(host))
 
+  // Live background runs by runId (for /workflow stop).
+  const activeRuns = new Map<string, ActiveRun>()
+
+  /** Shared execution path for run/resume/rerun: store + projection + dispatch + engine. */
+  async function executeRun(invocation: { agent: Agent; signal?: AbortSignal }, options: {
+    workflow: ReturnType<typeof loadWorkflow>['workflow']
+    yamlText: string
+    inputs: Record<string, unknown>
+    wait: boolean
+    prior?: Record<string, StepOutcome>
+  }): Promise<{ kind: 'success' | 'error'; text?: string }> {
+    const { workflow, yamlText, inputs, wait } = options
+    const runId = Math.random().toString(36).slice(2, 10)
+    const cwd = process.cwd()
+    const store = createRunStore({ runId, root: cwd })
+    const projector = createRunProjector(invocation.agent.session as unknown as Parameters<typeof createRunProjector>[0], { runId })
+    store.begin(workflow, yamlText, inputs)
+    projector.runStarted(workflow.name)
+
+    const abort = new AbortController()
+    const active: ActiveRun = { abort, name: workflow.name }
+    activeRuns.set(runId, active)
+
+    let jobLine: ((line: string) => void) | undefined
+    const engine = createEngine({
+      dispatch: createDispatch(host, {
+        parent: invocation.agent,
+        runId,
+        agentsDir: defaultAgentsDir(),
+        events: {
+          childStarted: (childId, label) => projector.agentStarted(label, String(childId)),
+          childSettled: (_childId, stopReason) => projector.agentEnded(agentOutcomeOf(stopReason)),
+        },
+      }),
+    })
+
+    const settle = (outcome: RunOutcome): void => {
+      store.finish({ status: outcome.status, steps: outcome.steps })
+      projector.runFinished(outcome.status === 'completed' ? 'completed' : 'error')
+      activeRuns.delete(runId)
+    }
+
+    const promise = engine.run(workflow, {
+      inputs,
+      runId,
+      signal: abort.signal,
+      prior: options.prior,
+      // Background jobs cannot confirm: a confirm step skips with an explicit
+      // error rather than being silently approved.
+      confirm: wait === true ? undefined : async (stepId) => {
+        throw new Error(`step "${stepId}" needs confirmation — re-run with --wait`)
+      },
+      observers: {
+        stepStarted: (stepId) => store.stepStarted(stepId),
+        stepSettled: (step) => {
+          store.stepSettled(step.id, step)
+          jobLine?.(`${step.id}: ${step.status}${step.usage !== undefined ? ` · ${step.usage.totalTokens} tok` : ''}`)
+        },
+      },
+    })
+
+    if (wait) {
+      const outcome = await promise
+      settle(outcome)
+      return { kind: outcome.status === 'completed' ? 'success' : 'error', text: renderOutcome(outcome) }
+    }
+
+    const jobId = host.jobs.start({
+      kind: 'workflow',
+      label: `${workflow.name} (${runId})`,
+      owner: invocation.agent.id,
+      run(handle) {
+        jobLine = (line) => {
+          try {
+            handle.append(line)
+          } catch {
+            /* the ring failing must never touch the run */
+          }
+        }
+        return {
+          cancel: () => {
+            abort.abort(new Error('stopped via job_kill or /workflow stop'))
+          },
+          done: promise
+            .then((outcome) => {
+              settle(outcome)
+              if (abort.signal.aborted) return { status: 'killed' as const, detail: 'stopped', result: renderOutcome(outcome) }
+              return {
+                status: outcome.status === 'completed' ? ('completed' as const) : ('failed' as const),
+                ...(outcome.status !== 'completed' ? { detail: 'see /workflow show for the failing step' } : {}),
+                result: renderOutcome(outcome),
+              }
+            })
+            .catch((error: unknown) => ({ status: 'failed' as const, detail: error instanceof Error ? error.message : String(error) })),
+        }
+      },
+    })
+    active.jobId = jobId
+    return {
+      kind: 'success',
+      text: `workflow "${workflow.name}" started in background — run ${runId}, job ${jobId}. Watch: /workflow show ${runId} · Stop: /workflow stop ${runId}`,
+    }
+  }
+
   host.effect(() => host.commands.register({
     name: 'workflow',
-    description: 'Run and inspect declarative YAML workflows (dsh-workflow plugin)',
+    description: 'Run, resume, and inspect declarative YAML workflows (dsh-workflow plugin)',
     handler: async (invocation) => {
-      const [sub, ...rest] = invocation.rawInput.trim().split(/\s+/)
-      // The host process runs in the session's workspace, so relative
-      // workflow paths resolve there.
+      const words = invocation.rawInput.trim().split(/\s+/).filter((w) => w !== '')
+      const [sub, ...rest] = words
       const cwd = process.cwd()
+      const wait = rest.includes('--wait')
+      const positional = rest.filter((w) => !w.startsWith('--'))
+      const flagValue = (flag: string): string | undefined => {
+        const idx = rest.indexOf(flag)
+        return idx >= 0 ? rest[idx + 1] : undefined
+      }
 
       if (sub === undefined || sub === '' || sub === 'help') {
         return { kind: 'success', text: HELP }
       }
 
       if (sub === 'list') {
-        const dir = rest[0] !== undefined && rest[0] !== '' ? resolvePath(rest[0]!) : cwd
+        const dir = positional[0] !== undefined ? resolvePath(positional[0]) : cwd
         let entries: string[]
         try {
           entries = readdirSync(dir)
@@ -103,63 +247,94 @@ export function registerWorkflowCommand(host: CommandHost): void {
         return { kind: 'success', text: rows.length === 0 ? `no *.workflow.yaml in ${dir}` : rows.join('\n') }
       }
 
-      if (sub === 'run') {
-        const file = rest[0]
-        if (file === undefined || file === '') return { kind: 'error', text: 'run needs a file: /workflow run <file.workflow.yaml> [json-args]' }
-        const path = resolvePath(cwd, file)
-        let text: string
-        try {
-          text = readFileSync(path, 'utf8')
-        } catch (error) {
-          return { kind: 'error', text: `cannot read ${path}: ${error instanceof Error ? error.message : String(error)}` }
-        }
-        let inputs: Record<string, unknown> = {}
-        if (rest[1] !== undefined) {
-          try {
-            const parsed: unknown = JSON.parse(rest.slice(1).join(' '))
-            if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) inputs = parsed as Record<string, unknown>
-            else return { kind: 'error', text: 'json-args must be a JSON object' }
-          } catch (error) {
-            return { kind: 'error', text: `json-args is not valid JSON: ${error instanceof Error ? error.message : String(error)}` }
+      if (sub === 'runs') {
+        const limit = positional[0] !== undefined ? Math.max(1, Math.min(1000, Number(positional[0]) || 20)) : 20
+        const rows = listRuns(cwd, limit)
+        if (rows.length === 0) return { kind: 'success', text: `no runs under ${join(cwd, '.dsh', 'workflow-runs')}` }
+        return { kind: 'success', text: rows.map(renderRunRow).join('\n') }
+      }
+
+      if (sub === 'show') {
+        const runId = positional[0]
+        if (runId === undefined) return { kind: 'error', text: 'show needs a run id: /workflow show <runId> (find one with /workflow runs)' }
+        const stored = loadRun(cwd, runId, (m) => host.logger?.warn(m))
+        if (stored === undefined) return { kind: 'error', text: `no run "${runId}" under ${join(cwd, '.dsh', 'workflow-runs')}` }
+        const metaName = typeof stored.meta['name'] === 'string' ? stored.meta['name'] : '?'
+        const lines = [`run ${runId} (${String(stored.meta['status'] ?? '?')}): ${metaName}`]
+        for (const step of Object.values(stored.steps)) {
+          const usage = step.usage === undefined ? '' : ` · ${step.usage.totalTokens} tok`
+          const replayed = step.replayed === true ? ' (replayed)' : ''
+          const suffix = step.status === 'completed' ? `${replayed}${usage}` : ` — ${step.status}${step.error === undefined ? '' : `: ${step.error}`}`
+          lines.push(`  ${step.id}: ${suffix}`)
+          if (step.status === 'completed' && step.output !== undefined && step.output !== '') {
+            const preview = step.output.length > 300 ? `${step.output.slice(0, 300)}…` : step.output
+            lines.push(`    ↳ ${preview.replace(/\n+/g, ' ⏎ ')}`)
           }
         }
+        return { kind: 'success', text: lines.join('\n') }
+      }
+
+      if (sub === 'stop') {
+        const runId = positional[0] ?? [...activeRuns.keys()].at(-1)
+        if (runId === undefined) return { kind: 'error', text: 'no active background runs' }
+        const active = activeRuns.get(runId)
+        if (active === undefined) return { kind: 'error', text: `run "${runId}" is not active (live: ${[...activeRuns.keys()].join(', ') || 'none'})` }
+        active.abort.abort(new Error('stopped via /workflow stop'))
+        if (active.jobId !== undefined) {
+          try {
+            (host.jobs as unknown as { kill?: (id: string) => unknown }).kill?.(active.jobId)
+          } catch {
+            /* the abort already settles the run; kill is belt-and-braces */
+          }
+        }
+        return { kind: 'success', text: `stopping run ${runId} (${active.name})` }
+      }
+
+      if (sub === 'prune') {
+        const keep = flagValue('--keep') !== undefined ? Math.max(0, Number(flagValue('--keep')) || 100) : 100
+        const deleted = pruneRuns(cwd, keep, (m) => host.logger?.warn(m))
+        return { kind: 'success', text: deleted.length === 0 ? 'nothing to prune' : `pruned ${deleted.length} run(s): ${deleted.join(', ')}` }
+      }
+
+      if (sub === 'resume' || sub === 'rerun' || sub === 'run') {
+        const target = positional[0]
+        let workflowText: string
+        let inputs: Record<string, unknown> = {}
+        let prior: Record<string, StepOutcome> | undefined
+
+        if (sub === 'run') {
+          if (target === undefined) return { kind: 'error', text: 'run needs a file: /workflow run <file.workflow.yaml> [json-args] [--wait]' }
+          const path = resolvePath(cwd, target)
+          try {
+            workflowText = readFileSync(path, 'utf8')
+          } catch (error) {
+            return { kind: 'error', text: `cannot read ${path}: ${error instanceof Error ? error.message : String(error)}` }
+          }
+          const jsonWords = rest.slice(rest.indexOf(target) + 1).filter((w) => !w.startsWith('--'))
+          if (jsonWords.length > 0) {
+            try {
+              const parsed: unknown = JSON.parse(jsonWords.join(' '))
+              if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) inputs = parsed as Record<string, unknown>
+              else return { kind: 'error', text: 'json-args must be a JSON object' }
+            } catch (error) {
+              return { kind: 'error', text: `json-args is not valid JSON: ${error instanceof Error ? error.message : String(error)}` }
+            }
+          }
+        } else {
+          if (target === undefined) return { kind: 'error', text: `${sub} needs a run id (find one with /workflow runs)` }
+          const stored = loadRun(cwd, target, (m) => host.logger?.warn(m))
+          if (stored === undefined) return { kind: 'error', text: `no run "${target}" under ${join(cwd, '.dsh', 'workflow-runs')}` }
+          workflowText = stored.workflowText
+          inputs = stored.inputs ?? {}
+          if (sub === 'resume') prior = stored.steps
+        }
+
         try {
-          const { workflow } = loadWorkflow(text, { filePath: file })
-          const runId = Math.random().toString(36).slice(2, 10)
-          const store = createRunStore({ runId, root: cwd })
-          const projector = createRunProjector(invocation.agent.session as unknown as Parameters<typeof createRunProjector>[0], { runId })
-          store.begin(workflow, text)
-          projector.runStarted(workflow.name)
-          // Per-run dispatch: every child is attributed to the invoking agent
-          // (the seam requires parent to be the exact live Agent), carries the
-          // roster persona at the start edge, and reports child edges so the
-          // projection's agent-start/agent-end pairs stay exact.
-          const engine = createEngine({
-            dispatch: createDispatch(host, {
-              parent: invocation.agent,
-              runId,
-              agentsDir: defaultAgentsDir(),
-              events: {
-                childStarted: (childId, label) => projector.agentStarted(label, String(childId)),
-                childSettled: (childId, stopReason) => projector.agentEnded(agentOutcomeOf(stopReason)),
-              },
-            }),
-          })
-          const outcome = await engine.run(workflow, {
-            inputs,
-            runId,
-            signal: invocation.signal,
-            observers: {
-              stepStarted: (stepId) => store.stepStarted(stepId),
-              stepSettled: (step: Parameters<typeof store.stepSettled>[1]) => store.stepSettled(step.id, step),
-            },
-          })
-          store.finish({ status: outcome.status, steps: outcome.steps })
-          projector.runFinished(outcome.status === 'completed' ? 'completed' : 'error')
-          return { kind: outcome.status === 'completed' ? 'success' : 'error', text: renderOutcome(outcome) }
+          const { workflow } = loadWorkflow(workflowText, { filePath: sub === 'run' ? target : `${sub}:${target}` })
+          return await executeRun(invocation, { workflow, yamlText: workflowText, inputs, wait, prior })
         } catch (error) {
           if (error instanceof WorkflowLoadError) return { kind: 'error', text: error.message }
-          return { kind: 'error', text: `run failed: ${error instanceof Error ? error.message : String(error)}` }
+          return { kind: 'error', text: `${sub} failed: ${error instanceof Error ? error.message : String(error)}` }
         }
       }
 

@@ -51,6 +51,8 @@ export interface StepOutcome {
   attempts: number
   /** Folded per-child token/model usage (present when the cost fold succeeded). */
   usage?: UsageSummary
+  /** True when this outcome was replayed from a prior run's checkpoint, not re-executed. */
+  replayed?: boolean
 }
 
 export interface RunOutcome {
@@ -74,6 +76,12 @@ export interface RunOptions {
     stepStarted?(stepId: string): void
     stepSettled?(outcome: StepOutcome): void
   }
+  /**
+   * Checkpoints from a prior run (resume): a prior `completed` outcome for
+   * the same stable step id is replayed verbatim unless the step's cache
+   * policy is `never`. Foreach children checkpoint under `<foreachId>#<index>`.
+   */
+  prior?: Record<string, StepOutcome>
 }
 
 const DEFAULT_MAX_CONCURRENCY = 4
@@ -228,18 +236,114 @@ export function createEngine(options: EngineOptions): Engine {
         const step = byId.get(id)!
         const outcome: StepOutcome = { id, status: 'completed', attempts: 0 }
         steps[id] = outcome
-        scope.steps[id] = { get output() { return outcome.output }, get 'action-output'() { return outcome.actionOutput } }
+        // References prefer the structured result: `{{steps.x.output.items}}`
+        // must traverse the validated object, not the rendered text.
+        scope.steps[id] = {
+          get output() { return outcome.structured ?? outcome.output },
+          get 'action-output'() { return outcome.actionOutput },
+        }
         runOptions.observers?.stepStarted?.(id)
 
+        // Checkpoint replay (resume): a prior completed outcome for this
+        // stable step id is reused verbatim unless cache policy forbids it.
+        const prior = runOptions.prior?.[id]
+        if (prior !== undefined && prior.status === 'completed' && (step.cache ?? 'on-failure') !== 'never') {
+          Object.assign(outcome, prior, { replayed: true })
+          runOptions.observers?.stepSettled?.(outcome)
+          continue
+        }
+
         if (isForeachStep(step)) {
-          // Validate the `over` array eagerly when it is already materialized;
-          // real fan-out execution lands with checkpointing in M3.
           const over = step.foreach.over.replace(/^\{\{/, '').replace(/\}\}$/, '')
           const resolved = resolveOverArray(over, scope)
-          outcome.status = 'failed'
-          outcome.error = resolved.ok
-            ? `foreach execution is not implemented until M3 (array with ${resolved.items.length} items resolved fine)`
-            : `foreach.over unusable: ${resolved.reason}`
+          if (!resolved.ok) {
+            outcome.status = 'failed'
+            outcome.error = `foreach.over unusable: ${resolved.reason}`
+            runOptions.observers?.stepSettled?.(outcome)
+            if ((step['on-error'] ?? 'fail') === 'fail') return { runId, status: 'failed', steps }
+            if (step['on-error'] === 'skip') outcome.status = 'skipped'
+            continue
+          }
+
+          // Bounded fan-out: workflow-layer semaphore (children queue beyond
+          // max-concurrency — never bet on the host's overflow behavior).
+          const concurrency = step.foreach['max-concurrency'] ?? DEFAULT_MAX_CONCURRENCY
+          const childTemplate = step.foreach.step
+          let running = 0
+          const waiters: Array<() => void> = []
+          const acquire = async (): Promise<void> => {
+            if (running < concurrency) {
+              running += 1
+              return
+            }
+            await new Promise<void>((release) => waiters.push(release))
+            running += 1
+          }
+          const release = (): void => {
+            running -= 1
+            waiters.shift()?.()
+          }
+          let stopDispatching = false
+          const childOutcomes: StepOutcome[] = []
+          await Promise.all(resolved.items.map(async (item, index) => {
+            if (stopDispatching) return
+            await acquire()
+            if (stopDispatching) {
+              release()
+              return
+            }
+            try {
+              const childId = `${id}#${index}`
+              const childOutcome: StepOutcome = { id: childId, status: 'completed', attempts: 0 }
+              childOutcomes[index] = childOutcome
+              steps[childId] = childOutcome
+              scope.steps[childId] = { get output() { return childOutcome.output }, get 'action-output'() { return childOutcome.actionOutput } }
+              runOptions.observers?.stepStarted?.(childId)
+              const childPrior = runOptions.prior?.[childId]
+              if (childPrior !== undefined && childPrior.status === 'completed' && (childTemplate.cache ?? 'on-failure') !== 'never') {
+                Object.assign(childOutcome, childPrior, { replayed: true })
+              } else {
+                await runStep({ ...childTemplate, id: childId } as StepDef, { inputs: scope.inputs, steps: scope.steps, item }, childOutcome, runOptions)
+              }
+              runOptions.observers?.stepSettled?.(childOutcome)
+              if (childOutcome.status === 'failed' && (childTemplate['on-error'] ?? 'fail') === 'fail') {
+                // Fail-fast fan-out: no NEW items dispatch; in-flight ones settle.
+                stopDispatching = true
+              }
+            } finally {
+              release()
+            }
+          }))
+
+          const settled = childOutcomes.filter((o) => o !== undefined)
+          const failed = settled.filter((o) => o.status === 'failed').length
+          const completed = settled.length - failed
+          const summary = {
+            total: resolved.items.length,
+            completed,
+            failed,
+            notDispatched: resolved.items.length - settled.length,
+            items: settled.map((o) => ({
+              index: Number(o.id.split('#')[1]),
+              status: o.status,
+              ...(o.replayed === true ? { replayed: true } : {}),
+              ...(o.output !== undefined ? { output: o.output.slice(0, 2000) } : {}),
+              ...(o.error !== undefined ? { error: o.error } : {}),
+            })),
+          }
+          outcome.status = settled.length > 0 && failed === settled.length ? 'failed' : 'completed'
+          if (outcome.status === 'failed' && stopDispatching) {
+            outcome.error = `fail-fast fan-out stopped after ${settled.length}/${resolved.items.length} items`
+          }
+          outcome.output = JSON.stringify(summary)
+          outcome.structured = summary
+          if (outcome.status === 'failed') {
+            const onError = step['on-error'] ?? 'fail'
+            runOptions.observers?.stepSettled?.(outcome)
+            if (onError === 'fail') return { runId, status: 'failed', steps }
+            if (onError === 'skip') outcome.status = 'skipped'
+            continue
+          }
           runOptions.observers?.stepSettled?.(outcome)
           continue
         }
@@ -283,7 +387,14 @@ export function createEngine(options: EngineOptions): Engine {
         runOptions.observers?.stepSettled?.(outcome)
       }
 
-      return { runId, status: Object.values(steps).every((s) => s.status === 'completed') ? 'completed' : 'failed', steps }
+      // Terminal status rides the TOP-LEVEL steps only. Foreach child
+      // checkpoints (<id>#<index>) that failed are already summarized inside
+      // their foreach step's structured output — they must not poison the run.
+      const walked = orderedIds.every((sid) => {
+        const s = steps[sid]
+        return s !== undefined && (s.status === 'completed' || s.status === 'skipped')
+      })
+      return { runId, status: walked ? 'completed' : 'failed', steps }
     },
   }
 }

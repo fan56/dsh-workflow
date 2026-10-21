@@ -27,7 +27,7 @@ export const name = 'dsh-workflow'
  * access without the inject declaration, proven by a real-host boot).
  * All of them come with every dsh-base profile.
  */
-export const inject = ['commands', 'subagents', 'agents', 'tools', 'systemPrompt']
+export const inject = ['commands', 'subagents', 'agents', 'tools', 'systemPrompt', 'jobs']
 
 export function apply(context: CommandHost): void {
   // The command handler assembles its own engine per run (dispatch needs the

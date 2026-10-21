@@ -179,7 +179,7 @@ steps:
   assert.equal(granted.status, 'completed')
 })
 
-test('foreach loads but refuses to execute until M3', async () => {
+test('foreach fans out with bounded concurrency and summarizes per-item outcomes', async () => {
   const yaml = `format: dsh-workflow
 version: 1
 name: fan
@@ -195,13 +195,98 @@ steps:
     foreach:
       over: steps.seed.output.items
       as: item
+      max-concurrency: 2
       step:
         executor: { agent: worker }
-        prompt: "{{item}}"
+        prompt: "adapt {{item}}"
+        on-error: continue
 `
-  const outcome = await runYaml(yaml, ['[]']).promise
-  assert.equal(outcome.status, 'failed')
-  assert.match(outcome.steps.spread.error ?? '', /foreach(\.over unusable| execution is not implemented)/)
+  const { workflow } = loadWorkflow(yaml)
+  const calls = []
+  const dispatch = async (req) => {
+    calls.push(req)
+    if (calls.length === 1) return { text: 'seeded', stopReason: 'completed', structured: { items: ['a', 'b', 'c'] } }
+    const item = req.prompt.replace('adapt ', '')
+    if (item === 'b') return { text: '', stopReason: 'error' }
+    return { text: `adapted ${item}`, stopReason: 'completed' }
+  }
+  const engine = createEngine({ dispatch, sleep: noSleep })
+  const outcome = await engine.run(workflow)
+  assert.equal(outcome.status, 'completed')
+  // 1 seed + 3 children.
+  assert.equal(calls.length, 4)
+  const summary = outcome.steps.spread.structured
+  assert.equal(summary.total, 3)
+  assert.equal(summary.completed, 2)
+  assert.equal(summary.failed, 1)
+  assert.equal(summary.items[1].status, 'failed')
+  assert.equal(summary.items[0].output, 'adapted a')
+  // Child checkpoints exist under the stable <foreachId>#<index> ids.
+  assert.equal(outcome.steps['spread#0'].status, 'completed')
+  assert.equal(outcome.steps['spread#1'].status, 'failed')
+})
+
+test('prior checkpoints replay completed steps and skip their dispatch', async () => {
+  const yaml = `format: dsh-workflow
+version: 1
+name: chain
+description: d
+steps:
+  - id: one
+    executor: { agent: worker }
+    prompt: p1
+  - id: two
+    needs: [one]
+    executor: { agent: worker }
+    prompt: "use {{steps.one.output}}"
+`
+  const { workflow } = loadWorkflow(yaml)
+  const prior = {
+    one: { id: 'one', status: 'completed', attempts: 1, output: 'prior-output' },
+  }
+  const calls = []
+  const engine = createEngine({
+    dispatch: async (req) => {
+      calls.push(req)
+      return { text: `done:${req.prompt}`, stopReason: 'completed' }
+    },
+    sleep: noSleep,
+  })
+  const outcome = await engine.run(workflow, { prior })
+  assert.equal(outcome.status, 'completed')
+  assert.equal(calls.length, 1)
+  assert.equal(outcome.steps.one.replayed, true)
+  assert.equal(outcome.steps.one.output, 'prior-output')
+  // `two` references the replayed output.
+  assert.equal(calls[0].prompt, 'use prior-output')
+})
+
+test('cache: never re-runs even when a prior checkpoint exists', async () => {
+  const yaml = `format: dsh-workflow
+version: 1
+name: fresh
+description: d
+steps:
+  - id: sideeffect
+    executor: { agent: worker }
+    prompt: p
+    cache: never
+`
+  const { workflow } = loadWorkflow(yaml)
+  const calls = []
+  const engine = createEngine({
+    dispatch: async (req) => {
+      calls.push(req)
+      return { text: 'ran', stopReason: 'completed' }
+    },
+    sleep: noSleep,
+  })
+  const outcome = await engine.run(workflow, {
+    prior: { sideeffect: { id: 'sideeffect', status: 'completed', attempts: 1, output: 'old' } },
+  })
+  assert.equal(calls.length, 1)
+  assert.equal(outcome.steps.sideeffect.replayed, undefined)
+  assert.equal(outcome.steps.sideeffect.output, 'ran')
 })
 
 class FakeRosterError extends Error {
