@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const { createRunStore } = await import('../lib/run-store.js')
+const { createRunStore, loadRun, listRuns, pruneRuns } = await import('../lib/run-store.js')
 const { loadWorkflow } = await import('../lib/loader.js')
 
 const WORKFLOW = loadWorkflow(`format: dsh-workflow
@@ -105,6 +105,42 @@ test('write failures warn and degrade — the store never throws into the run', 
     store.stepStarted('solo')
     assert.ok(warnings.some((w) => w.includes('event append')))
     store.finish({ status: 'completed', steps: {} })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('loadRun round-trips full outcomes (usage + structured) for resume', async () => {
+  const root = freshRoot()
+  try {
+    const doc = 'format: dsh-workflow\nversion: 1\nname: rt\ndescription: d\nsteps:\n  - id: solo\n    executor: { agent: w }\n    prompt: p\n'
+    const { workflow } = loadWorkflow(doc)
+    if (workflow === undefined) throw new Error('loadWorkflow returned undefined workflow')
+    const store = createRunStore({ runId: 'rt1', root })
+    store.begin(workflow, 'yaml-text', { k: 'v' })
+    store.stepSettled('solo', { id: 'solo', status: 'completed', attempts: 1, output: 'full output', structured: { n: 1 }, usage: { inputTokens: 3, outputTokens: 4, totalTokens: 7 } })
+    store.finish({ status: 'completed', steps: {} })
+    // Distinct timestamps: prune keeps the newest run.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+
+    const loaded = loadRun(root, 'rt1')
+    assert.ok(loaded !== undefined)
+    assert.deepEqual(loaded.inputs, { k: 'v' })
+    assert.equal(loaded.workflowText, 'yaml-text')
+    const solo = loaded.steps.solo
+    assert.equal(solo.status, 'completed')
+    assert.equal(solo.output, 'full output')
+    assert.deepEqual(solo.structured, { n: 1 })
+    assert.equal(solo.usage?.totalTokens, 7)
+
+    assert.equal(listRuns(root).length, 1)
+    const store2 = createRunStore({ runId: 'rt2', root })
+    store2.begin(workflow)
+    store2.finish({ status: 'failed', steps: {} })
+    const pruned = pruneRuns(root, 1)
+    assert.deepEqual(pruned, ['rt1'])
+    assert.equal(loadRun(root, 'rt1'), undefined)
+    assert.ok(loadRun(root, 'rt2') !== undefined)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

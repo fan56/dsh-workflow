@@ -103,6 +103,16 @@ function checkStepBody(step: Record<string, unknown>, path: string, violations: 
   if (output !== undefined) {
     if (!isPlainObject(output) || output['type'] !== 'object') {
       violations.push({ path: `${path}.output`, message: 'output must be an object-root JSON Schema ({"type": "object", ...})' })
+    } else {
+      // Host structured capture rejects required names absent from properties —
+      // catch it at load (real-host verified failure mode).
+      const required = Array.isArray(output['required']) ? (output['required'] as unknown[]) : []
+      const properties = isPlainObject(output['properties']) ? (output['properties'] as Record<string, unknown>) : undefined
+      for (const name of required) {
+        if (properties === undefined || typeof name !== 'string' || !(name in properties)) {
+          violations.push({ path: `${path}.output`, message: `required names "${String(name)}" which is not in properties (host schema rule)` })
+        }
+      }
     }
   }
   const acceptance = step['acceptance']

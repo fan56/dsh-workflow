@@ -31,7 +31,8 @@ export type RunStoreEventType =
   | 'step-failed'
   | 'step-skipped'
 
-const SAFE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
+// `#` is legal: foreach child checkpoints are named <foreachId>#<index>.
+const SAFE_ID = /^[a-z0-9][a-z0-9#-]{0,63}$/
 
 export interface RunStoreOptions {
   runId: string
