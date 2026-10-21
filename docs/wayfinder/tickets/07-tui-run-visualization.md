@@ -83,3 +83,27 @@ mini(单行)+graph overlay(分层 DAG 文本图+漫游+步详情)。数据全自
 
 cordis 作用域三墙(踩雷账补全):读守卫(inject)、写守卫(provide)、
 **兄弟 scope 隔离**(provide 的服务跨插件不可见)。
+
+## Design v2(2026-10-21,用户定调:workflow 是 tree——Graph 模式重设计为缩进树)
+
+**核心决策:视图是树,执行仍是图。** `needs` 汇流/菱形是执行层表达力,保留;
+展示按树走——每 Step 挂主父(`needs[0]`),无父挂 root,foreach 子项天然为子节点;
+多父降级为行尾标注(`⤷ also needs: x`)。渲染=纯递归缩进(零布线),
+滚动=行滚动(ListController 现成),比 DAG 布局砍掉二维布线/坐标/左右漫游。
+
+```
+▾ workflow: dsh-plugin-wave                ▶ running · 3/6 · 14.8k tok
+  ├─ ✅ intel                              1.2k tok
+  │   └─ ✅ audit                          980 tok
+  │       └─ ▶ adapt  ▦ 2/3               2.2k tok
+  │           ├─ ✅ #0 repo-a              811 tok
+  │           ├─ ▶ #1 repo-b              1.4k tok
+  │           └─ ○ #2 repo-c
+  ├─ ⏭ summary                            (等上游)
+  └─ ○ verify  ?confirm
+      └─ ○ release  🔒
+```
+
+状态符 ○/▶/✅/↻/✗/⏭/?/🔒;foreach `▦ m/n` 聚合可展开;执行点高亮+自动跟随
+(`f` 锁/解锁);`←→` 折叠/展开子树;`Enter` 步详情(输出/错误/重试/usage);
+Mini 行不变。数据源不变(workflow.yaml 快照 + run.json + 事件 fold)。
