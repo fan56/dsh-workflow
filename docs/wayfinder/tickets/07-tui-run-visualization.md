@@ -34,3 +34,12 @@ B. **常驻面板**:activity panel 套路的 workflow 面板(活动 run graph)�
 
 方案原型(用户反应后定 A/B)+ tui-pi 仓内的落点清单。
 用户已定调:tui 是主力 UI,这一环重要。
+
+## Resolution(2026-10-21,方案拍板——用户定:专门 widget+文本流程图)
+
+**形态**:tui-pi 第四个常驻 widget(挂 todosDoc 槽,与 Todos/Think/Tool 并列)。
+- **Mini 模式**(默认):单行,有活动 run 才出现——`▸ workflow: <name> ▶ <当前步> ▦ m/n ✓ · <tok>`
+- **Graph 模式**(快捷键进 overlay):分层 DAG 文本流程图。needs 拓扑分层;状态符 ○/▶/✅/↻/✗/⏭/?;foreach 聚合双线框 `▦ m/n ✓` 可展开子行;执行点粗框+视口自动居中(f 可锁/解锁);↑↓←→ 漫游;Enter 步详情(输出/token/错误)
+- **数据源零新协议**:图=cwd 下 run store 的 workflow.yaml 快照,直接 import 同 profile 的 @aiwayds/dsh-workflow `loadWorkflow`(纯函数);执行态=session fold(agentViews,已有)+run.json 尾随
+- **落点**:tui-pi 仓 src/workflow-widget.ts + todosDoc 第四槽 + Ctrl+W(占位)
+- **实施注意**:本插件 run-store 的 run.json 需在 begin 落 name(YAML 快照旁);foreach 子步 id 含 `#`,渲染层按 `#` 折叠
