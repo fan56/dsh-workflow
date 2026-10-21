@@ -73,7 +73,7 @@ function checkRefScope(text: string, path: string, violations: WorkflowViolation
 }
 
 /** Static lint of one step body (shared by plain and foreach-template steps). */
-function checkStepBody(step: Record<string, unknown>, path: string, violations: WorkflowViolation[], ctx: { stepIds: Set<string>; inputIds: Set<string>; allowItem: boolean }): void {
+function checkStepBody(step: Record<string, unknown>, path: string, violations: WorkflowViolation[], ctx: { stepIds: Set<string>; inputIds: Set<string>; allowItem: boolean; phaseScope: Set<string> }): void {
   const executor = step['executor']
   if (!isPlainObject(executor)) {
     violations.push({ path: `${path}.executor`, message: 'executor is required and must be an object' })
@@ -98,6 +98,14 @@ function checkStepBody(step: Record<string, unknown>, path: string, violations: 
   }
   if (step['action'] !== undefined && (typeof step['action'] !== 'string' || step['action'] === '')) {
     violations.push({ path: `${path}.action`, message: 'action must be a non-empty string when present' })
+  }
+  if (step['phase'] !== undefined) {
+    const phase = step['phase']
+    if (typeof phase !== 'string' || phase === '') {
+      violations.push({ path: `${path}.phase`, message: 'phase must be a non-empty string when present' })
+    } else if (ctx.phaseScope.size > 0 && !ctx.phaseScope.has(phase)) {
+      violations.push({ path: `${path}.phase`, message: `phase "${phase}" is not declared in top-level phases (${[...ctx.phaseScope].join(', ')})` })
+    }
   }
   const output = step['output']
   if (output !== undefined) {
@@ -160,7 +168,7 @@ function checkSharedStepKeys(step: Record<string, unknown>, path: string, violat
   return { needs }
 }
 
-function checkStep(step: unknown, index: number, violations: WorkflowViolation[], ctx: { stepIds: Set<string>; inputIds: Set<string> }): void {
+function checkStep(step: unknown, index: number, violations: WorkflowViolation[], ctx: { stepIds: Set<string>; inputIds: Set<string>; phaseScope: Set<string> }): void {
   const path = `steps.${index}`
   if (!isPlainObject(step)) {
     violations.push({ path, message: 'step must be an object' })
@@ -205,13 +213,13 @@ function checkStep(step: unknown, index: number, violations: WorkflowViolation[]
     const childAllowed = STEP_KEYS.filter((k) => k !== 'foreach' && k !== 'id')
     checkUnknownKeys(child, childAllowed, `${path}.foreach.step`, violations)
     if (child['id'] !== undefined) violations.push({ path: `${path}.foreach.step.id`, message: 'template steps take no id (checkpoint key is <foreachId>#<index>)' })
-    checkStepBody(child, `${path}.foreach.step`, violations, { ...stepCtx, allowItem: true })
+    checkStepBody(child, `${path}.foreach.step`, violations, { ...stepCtx, allowItem: true, phaseScope: ctx.phaseScope })
     checkSharedStepKeys(child, `${path}.foreach.step`, violations)
     return
   }
 
   // Plain step.
-  checkStepBody(step, path, violations, stepCtx)
+  checkStepBody(step, path, violations, { ...stepCtx, phaseScope: ctx.phaseScope })
   const { needs } = checkSharedStepKeys(step, path, violations)
   if (needs !== undefined) {
     for (const dep of needs) {
@@ -293,6 +301,20 @@ export function loadWorkflow(text: string, options: LoadOptions = {}): LoadSucce
     }
   }
 
+  // Phases declaration: tab order for the visualization. Step phase values
+  // must reference a declared title (typo'd phase = authoring error, fail-loud).
+  const phaseIds = new Set<string>()
+  if (doc['phases'] !== undefined) {
+    if (!Array.isArray(doc['phases']) || doc['phases'].some((p) => typeof p !== 'string' || p === '')) {
+      violations.push({ path: 'phases', message: 'phases must be an array of non-empty strings (tab order)' })
+    } else {
+      for (const title of doc['phases'] as string[]) {
+        if (phaseIds.has(title)) violations.push({ path: 'phases', message: `duplicate phase "${title}"` })
+        phaseIds.add(title)
+      }
+    }
+  }
+
   // Steps: ids first (cross-references need them), then per-step checks.
   const stepIds = new Set<string>()
   const rawSteps = doc['steps']
@@ -305,7 +327,7 @@ export function loadWorkflow(text: string, options: LoadOptions = {}): LoadSucce
         stepIds.add(step['id'])
       }
     })
-    rawSteps.forEach((step, i) => checkStep(step, i, violations, { stepIds, inputIds }))
+    rawSteps.forEach((step, i) => checkStep(step, i, violations, { stepIds, inputIds, phaseScope: phaseIds }))
     // Cycle detection over `needs` (plain steps only; foreach edges come from its own needs).
     const needsOf = new Map<string, string[]>()
     rawSteps.forEach((step) => {

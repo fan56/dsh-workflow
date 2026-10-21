@@ -81,6 +81,13 @@ export interface StepDef {
    * the dual-track boundary. Authored by the workflow owner; runs in-process.
    */
   action?: string
+  /**
+   * Pure annotation (schema v1.1): which phase tab this step belongs to in
+   * the tui visualization. No execution semantics. When the workflow declares
+   * top-level `phases`, the value MUST match one of them (fail-loud — a
+   * typo'd phase name is an authoring error).
+   */
+  phase?: string
 }
 
 /** A foreach step: fan out one templated child step per item of an upstream array. */
@@ -115,14 +122,16 @@ export interface WorkflowDef {
   name: string
   description: string
   inputs?: WorkflowInputDecl[]
+  /** Optional phase titles in tab order (tui visualization; pure annotation). */
+  phases?: string[]
   steps: AnyStepDef[]
 }
 
 /** Top-level keys the loader accepts — anything else is a violation. */
-export const TOP_LEVEL_KEYS = ['format', 'version', 'name', 'description', 'inputs', 'steps'] as const
+export const TOP_LEVEL_KEYS = ['format', 'version', 'name', 'description', 'inputs', 'phases', 'steps'] as const
 
 /** Keys a plain step accepts. */
 export const STEP_KEYS = [
   'id', 'executor', 'prompt', 'needs', 'retry', 'on-error', 'cache', 'confirm',
-  'output', 'acceptance', 'action', 'foreach',
+  'output', 'acceptance', 'action', 'phase', 'foreach',
 ] as const
