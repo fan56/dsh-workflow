@@ -36,3 +36,17 @@ claimed-by: null
 6. YAML schema 校验纪律(承 02 票):未知字段报错(fail-loud 白名单)、name/文件名互锁、交叉不变量(foreach.max-concurrency ≤ 治理上限)。
 
 表达力遗留(进雾,不阻塞 spec):条件边(`if`)、foreach 嵌套、跨 workflow 引用。
+
+## M4 Acceptance(2026-10-21,v1 验收基准通过)
+
+dsh-plugin-wave 形状的流水线(wave-smoke:intel→audit→foreach adapt→wrap,
+3 phases+4 inputs)在真宿主全链路验收:
+
+1. **首轮后台跑**(真模型真子代理):audit 真判断了 4 个候选仓,foreach 派发
+   4 个子代理——中途 /quit 真实打断(进程死,run 冻结在 running)
+2. **resume 断点续跑**:新 run 从 checkpoint 起跑,全 8 步 completed 至 wrap
+   (期间抓到并修复:resume 快照加载误触 name/stem 互锁——真机发现)
+3. 附带实证:后台 job 存活跨 script 会话脱离;token 账全程落盘
+   (累计 ~165k tok 可审计)
+
+schema v1.1(phases+step.phase)随本轮进入——v3 overlay 的段 tab 数据源就绪。
