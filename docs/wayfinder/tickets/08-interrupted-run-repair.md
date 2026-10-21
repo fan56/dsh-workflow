@@ -38,3 +38,14 @@ Workflow 中途被打断(进程重启/崩溃/手动中断)后,如何借用 dsh �
 
 L1/L2 的执行契约(resume 命令的决策树、child 反查 API 链、修补写回格式)
 → 实现进 resume 路径。
+
+## Resolution(2026-10-21,L1 已实现;L2 留票)
+
+**L1 结局修补已落地**(commit 同日):run store 在 dispatch 时绑定 childId
+(`step-child` 事件+snapshot childId 字段),`reconcileInterruptedSteps` 在
+resume 前对非 completed 步读 child 会话的 turn/end——completed 则把产出从
+child 日志捞回、翻转状态、标 replayed。全腿 best-effort:缺 childId(旧 run)、
+日志不可读、结局非 completed 都降级 L3 整步重跑。63 测试绿。
+
+**L2 步内续聊留票后续**(sendMessage 驱动半路 child,交互语义较重——先看
+L1+L3 的实际体感再定优先级)。
