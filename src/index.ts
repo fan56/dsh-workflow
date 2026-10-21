@@ -77,6 +77,9 @@ export function apply(context: CommandHost): void {
   context.effect(() => {
     const disposer = context.systemPrompt.section({
     name: 'dsh-workflow:usage',
+    // Anchor next to the native workflow tool's guidance section (same
+    // family of intent — the model reads them as one block).
+    order: context.systemPrompt.getSectionOrder('TOOL_WORKFLOW'),
     text: [
       '## dsh-workflow (durable YAML workflows)',
       'The /workflow command family runs DECLARATIVE YAML workflows that fan out subagents — durable, resumable pipelines (release waves, research sweeps, recurring checks).',

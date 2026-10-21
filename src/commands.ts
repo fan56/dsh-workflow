@@ -52,6 +52,7 @@ export interface CommandHost extends DispatchHost, JobsHost {
   /** Register a system-prompt section (model guidance). */
   systemPrompt: {
     section(section: { name: string; text: string; order?: number }): unknown
+    getSectionOrder(anchor: string): number
   }
   commands: {
     register(definition: {
