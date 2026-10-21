@@ -27,6 +27,7 @@ import { installChildCompositionListener } from './composition.ts'
 import { createRunStore, listRuns, loadRun, pruneRuns } from './run-store.ts'
 import { createRunProjector } from './projection.ts'
 import { defaultAgentsDir } from './roster.ts'
+import { widgetRunSettled, widgetRunStarted, widgetStepUpdate } from './run-state.ts'
 
 /** Structural view of the jobs registry (the shape executeRun uses). */
 export interface JobsHost {
@@ -141,10 +142,12 @@ export function registerWorkflowCommand(host: CommandHost): void {
       }),
     })
 
+    widgetRunStarted(runId, workflow.name)
     const settle = (outcome: RunOutcome): void => {
       store.finish({ status: outcome.status, steps: outcome.steps })
       projector.runFinished(outcome.status === 'completed' ? 'completed' : 'error')
       activeRuns.delete(runId)
+      widgetRunSettled(runId, outcome.status)
     }
 
     const promise = engine.run(workflow, {
@@ -158,9 +161,13 @@ export function registerWorkflowCommand(host: CommandHost): void {
         throw new Error(`step "${stepId}" needs confirmation — re-run with --wait`)
       },
       observers: {
-        stepStarted: (stepId) => store.stepStarted(stepId),
+        stepStarted: (stepId) => {
+          store.stepStarted(stepId)
+          widgetStepUpdate(runId, stepId, 'running')
+        },
         stepSettled: (step) => {
           store.stepSettled(step.id, step)
+          widgetStepUpdate(runId, step.id, step.status, step.usage?.totalTokens)
           jobLine?.(`${step.id}: ${step.status}${step.usage !== undefined ? ` · ${step.usage.totalTokens} tok` : ''}`)
         },
       },
