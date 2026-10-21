@@ -40,7 +40,7 @@ export function apply(context: CommandHost): void {
     if (skills === undefined) return () => {}
     const bodyUrl = new URL('../skills/dsh-workflow-config/SKILL.md', import.meta.url)
     const description = 'dsh-workflow 插件使用与配置指南。凡涉及创建/修改/删除/运行 workflow、.workflow.yaml 写法(schema/字段/示例)、phase 阶段与 foreach 扇出、断点续跑 resume、token 成本账、run 记录查询、roster agent 引用、插件安装,先读本指南。触发词:workflow、工作流、流水线、dsh-workflow、run、resume、增删改查。'
-    const disposer = skills.registerProvider({
+    const disposer = skills.registerProvider(() => ({
       name: 'dsh-workflow-config',
       list: () => Promise.resolve([{
         name: 'dsh-workflow-config',
@@ -64,7 +64,7 @@ export function apply(context: CommandHost): void {
           content: body,
         }
       },
-    })
+    }))
     return typeof disposer === 'function' ? (disposer as () => void) : () => {}
   })
   // The command handler assembles its own engine per run (dispatch needs the
