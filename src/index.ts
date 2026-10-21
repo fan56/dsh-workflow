@@ -14,6 +14,8 @@
  * @module @aiwayds/dsh-workflow
  */
 
+import { readFileSync } from 'node:fs'
+import { fileURLToPath, URL } from 'node:url'
 import { registerWorkflowCommand, type CommandHost } from './commands.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -27,9 +29,44 @@ export const name = 'dsh-workflow'
  * access without the inject declaration, proven by a real-host boot).
  * All of them come with every dsh-base profile.
  */
-export const inject = ['commands', 'subagents', 'agents', 'tools', 'systemPrompt', 'jobs']
+export const inject = ['commands', 'subagents', 'agents', 'tools', 'systemPrompt', 'jobs', 'skills']
 
 export function apply(context: CommandHost): void {
+  // Usage skill (family convention: <plugin>-config): teaches the model how
+  // to create/run/inspect workflows and configure the plugin. Served through
+  // the host skills surface; silent no-op without it.
+  context.effect(() => {
+    const skills = (context as unknown as { skills?: { registerProvider(provider: unknown): unknown } }).skills
+    if (skills === undefined) return () => {}
+    const bodyUrl = new URL('../skills/dsh-workflow-config/SKILL.md', import.meta.url)
+    const description = 'dsh-workflow 插件使用与配置指南。凡涉及创建/修改/删除/运行 workflow、.workflow.yaml 写法(schema/字段/示例)、phase 阶段与 foreach 扇出、断点续跑 resume、token 成本账、run 记录查询、roster agent 引用、插件安装,先读本指南。触发词:workflow、工作流、流水线、dsh-workflow、run、resume、增删改查。'
+    const disposer = skills.registerProvider({
+      name: 'dsh-workflow-config',
+      list: () => Promise.resolve([{
+        name: 'dsh-workflow-config',
+        description,
+        invocation: { modelInvocable: true, userInvocable: true },
+        provider: 'dsh-workflow-config',
+        source: 'bundled',
+        locator: bodyUrl,
+      }]),
+      async get() {
+        const raw = readFileSync(fileURLToPath(bodyUrl), 'utf8')
+        const body = raw.startsWith('---')
+          ? raw.slice(raw.indexOf('\n', raw.indexOf('---') + 3) + 1).trim()
+          : raw
+        return {
+          name: 'dsh-workflow-config',
+          description,
+          invocation: { modelInvocable: true, userInvocable: true },
+          provider: 'dsh-workflow-config',
+          source: 'bundled',
+          content: body,
+        }
+      },
+    })
+    return typeof disposer === 'function' ? (disposer as () => void) : () => {}
+  })
   // The command handler assembles its own engine per run (dispatch needs the
   // invoking agent as the children's parent), so plugin setup is one row.
   registerWorkflowCommand(context)
@@ -51,6 +88,10 @@ export function apply(context: CommandHost): void {
     })
     return typeof disposer === 'function' ? () => { (disposer as () => void)() } : () => {}
   })
+  // The tui widget activates through the file seam: the command path calls
+  // flushWidgetFile() on every run/step state change, writing the mini lines
+  // plus the overlay manifest into \$DSH_HOME/tui-widgets/. No tui installed
+  // = nobody reads the files, which is exactly the correct no-op.
 }
 
 export { loadWorkflow } from './loader.ts'
