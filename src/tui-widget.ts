@@ -11,6 +11,7 @@
  */
 
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { snapshotWidgetRuns, type WidgetRunState } from './run-state.ts'
@@ -93,6 +94,14 @@ export function flushWidgetFile(): void {
     mkdirSync(dirname(widgetFile()), { recursive: true })
     if (lines.length === 0) rmSync(widgetFile(), { force: true })
     else writeFileSync(widgetFile(), `${lines.join('\n')}\n`)
+    // The overlay manifest: points the tui's generic driver at this package's
+    // state machine (absolute path — a bare specifier would resolve from the
+    // importer's node_modules, which does not contain this package).
+    const overlayPath = fileURLToPath(import.meta.url).replace('tui-widget.js', 'tui-overlay.js')
+    writeFileSync(join(dirname(widgetFile()), 'manifest.json'), `${JSON.stringify({
+      module: overlayPath,
+      exportName: 'buildOverlay',
+    })}\n`)
   } catch {
     /* presence must never touch the run */
   }

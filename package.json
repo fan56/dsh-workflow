@@ -70,5 +70,15 @@
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./tui-overlay": {
+      "types": "./lib/tui-overlay.d.ts",
+      "default": "./lib/tui-overlay.js"
+    }
   }
 }
