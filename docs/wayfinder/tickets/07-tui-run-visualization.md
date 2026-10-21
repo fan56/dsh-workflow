@@ -62,3 +62,24 @@ mini(单行)+graph overlay(分层 DAG 文本图+漫游+步详情)。数据全自
 **时序**:bundles 树序 tui-pi 在前;保险=服务未就绪挂 added 类事件等一步(registry provider-added 先例)。
 
 **分工**:tui-pi 开缝(小,通用资产)→ dsh-workflow 写 widget(大,本仓所有权)。
+
+## Implementation(2026-10-21,mini widget 已上线真机验收;graph overlay 二期)
+
+**通道反转(cordis 服务缝 → 文件缝,真机实证)**:cordis 的 provide 是**作用域私有**
+——tui-pi 在自己插件 scope provide 的 `tuiWidgets`,兄弟插件(dsh-workflow)的
+`ctx.get` 返回 undefined(三次真机实证,读/写守卫之外第三道墙)。缝改为**文件协议**:
+
+- dsh-workflow 写 `$DSH_HOME/tui-widgets/dsh-workflow.lines`(run/step 每次状态
+  变化即写;内容=mini 行;settled 后 60s 定时清文件,unref 定时器)
+- tui-pi 渲染该目录下所有 `*.lines`(`ExternalWidgetFile`,mtime 变化重读,
+  `#` 行为元数据跳过;零 workflow 知识,纯行渲染器)
+
+**真机验收**:fan 流水线跑通,TUI 输入框上方渲染
+`▸ workflow: fan ▶ 0/1 ▶1 ▸ seed` → 实时变 `✗ 0/1`(状态实时);widget 文件
+与 run store 双落盘。所有权拍板不变:内容与时机 100% 在 dsh-workflow。
+
+**二期(Graph overlay)未做**:分层 DAG 文本图+漫游+步详情——设计已定
+(本票 Resolution),待 mini 用出体感后开工。
+
+cordis 作用域三墙(踩雷账补全):读守卫(inject)、写守卫(provide)、
+**兄弟 scope 隔离**(provide 的服务跨插件不可见)。
