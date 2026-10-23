@@ -6,10 +6,10 @@
  * patches, never claims `ctx.workflowEngine` — the native workflow tool owns
  * one-off orchestration; this plugin owns named, resumable pipelines.
  *
- * M1 scope (docs/SPEC.md §5): YAML loader (fail-loud), serial engine, bare
- * dispatch, and the minimal `/workflow run|list|help` command for real-host
- * smoke tests. Run Store, persona surgery, jobs, and the full command family
- * follow in M2/M3.
+ * v1 scope complete (docs/SPEC.md §5, M1-M4): fail-loud YAML loader, serial
+ * + foreach engine over the host subagent seam, Run Store with per-step cost
+ * accounting, the /workflow command family, model tools, the dsh-workflow-config
+ * usage skill, a tui widget (file seam), and checkpoint resume with L1 repair.
  *
  * @module @aiwayds/dsh-workflow
  */
@@ -17,6 +17,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
 import { registerWorkflowCommand, type CommandHost } from './commands.ts'
+import { createWorkflowTools } from './tools.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'dsh-workflow'
@@ -70,9 +71,6 @@ export function apply(context: CommandHost): void {
     }))
     return typeof disposer === 'function' ? (disposer as () => void) : () => {}
   })
-  // The command handler assembles its own engine per run (dispatch needs the
-  // invoking agent as the children's parent), so plugin setup is one row.
-  registerWorkflowCommand(context)
   // Model guidance: without this section the model has no idea the plugin
   // exists — user requests like "给我创建一个 workflow" get hijacked by
   // whatever other workflow skill is installed (real-tui verified). Keep it
@@ -94,6 +92,20 @@ export function apply(context: CommandHost): void {
     })
     return typeof disposer === 'function' ? () => { (disposer as () => void)() } : () => {}
   })
+  // Model tools: the natural-language entry (works in headless/web/tui —
+  // no slash command required). Shares the command family's executor.
+  const command = registerWorkflowCommand(context)
+  const tools = (context as unknown as { tools?: { register(tool: unknown): unknown } }).tools
+  if (tools !== undefined) {
+    for (const tool of createWorkflowTools({
+      command,
+      agentProvider: () => undefined,
+      cwdProvider: () => process.cwd(),
+    })) {
+      const toolDisposer = tools.register(tool)
+      void toolDisposer
+    }
+  }
   // The tui widget activates through the file seam: the command path calls
   // flushWidgetFile() on every run/step state change, writing the mini lines
   // plus the overlay manifest into \$DSH_HOME/tui-widgets/. No tui installed

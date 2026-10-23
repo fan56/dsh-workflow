@@ -1,5 +1,5 @@
 /**
- * The `/workflow` command family (M3): run/resume/rerun/stop in the
+ * The `/workflow` command family: run/resume/rerun/stop in the
  * foreground or as background `ctx.jobs` jobs, plus runs/show/prune over the
  * Run Store.
  *
@@ -27,8 +27,9 @@ import { installChildCompositionListener } from './composition.ts'
 import { createRunStore, listRuns, loadRun, pruneRuns } from './run-store.ts'
 import { createRunProjector } from './projection.ts'
 import { defaultAgentsDir } from './roster.ts'
-import { widgetRunSettled, widgetRunStarted, widgetStepUpdate } from './run-state.ts'
 import { flushWidgetFile } from './tui-widget.ts'
+import { reconcileInterruptedSteps } from './repair.ts'
+import { widgetRunSettled, widgetRunStarted, widgetStepUpdate } from './run-state.ts'
 
 /** Structural view of the jobs registry (the shape executeRun uses). */
 export interface JobsHost {
@@ -70,6 +71,9 @@ interface ActiveRun {
   jobId?: string
 }
 
+/** Live background runs by runId — shared by the command family and the model tools. */
+const activeRuns = new Map<string, ActiveRun>()
+
 const HELP = `usage:
   /workflow run <file.workflow.yaml> [json-args] [--wait]
   /workflow resume <runId> [--wait]     checkpoint resume (completed steps replay, cache:never re-runs)
@@ -107,16 +111,24 @@ function renderRunRow(row: { runId: string; status: string; name?: string; finis
   return `  ${row.runId}  ${row.status.padEnd(9)}  ${row.name ?? '?'}${row.finishedAt !== undefined ? `  (${row.finishedAt})` : ''}`
 }
 
-export function registerWorkflowCommand(host: CommandHost): void {
+export interface RegisteredWorkflowCommand {
+  executeRun(agent: Agent, signal: AbortSignal | undefined, options: {
+    workflow: ReturnType<typeof loadWorkflow>['workflow']
+    yamlText: string
+    inputs: Record<string, unknown>
+    wait: boolean
+    prior?: Record<string, StepOutcome>
+  }): Promise<{ kind: 'success' | 'error'; text?: string }>
+  activeRuns: Map<string, ActiveRun>
+}
+
+export function registerWorkflowCommand(host: CommandHost): RegisteredWorkflowCommand {
   // One listener for the whole plugin: parks the persona/leaf composition at
   // dispatch and installs it on each child scope at the start edge.
   host.effect(() => installChildCompositionListener(host))
 
-  // Live background runs by runId (for /workflow stop).
-  const activeRuns = new Map<string, ActiveRun>()
-
   /** Shared execution path for run/resume/rerun: store + projection + dispatch + engine. */
-  async function executeRun(invocation: { agent: Agent; signal?: AbortSignal }, options: {
+  async function executeRunEx(agent: Agent, signal: AbortSignal | undefined, options: {
     workflow: ReturnType<typeof loadWorkflow>['workflow']
     yamlText: string
     inputs: Record<string, unknown>
@@ -127,7 +139,7 @@ export function registerWorkflowCommand(host: CommandHost): void {
     const runId = Math.random().toString(36).slice(2, 10)
     const cwd = process.cwd()
     const store = createRunStore({ runId, root: cwd })
-    const projector = createRunProjector(invocation.agent.session as unknown as Parameters<typeof createRunProjector>[0], { runId })
+    const projector = createRunProjector(agent.session as unknown as Parameters<typeof createRunProjector>[0], { runId })
     store.begin(workflow, yamlText, inputs)
     projector.runStarted(workflow.name)
 
@@ -138,7 +150,7 @@ export function registerWorkflowCommand(host: CommandHost): void {
     let jobLine: ((line: string) => void) | undefined
     const engine = createEngine({
       dispatch: createDispatch(host, {
-        parent: invocation.agent,
+        parent: agent,
         runId,
         agentsDir: defaultAgentsDir(),
         events: {
@@ -151,7 +163,6 @@ export function registerWorkflowCommand(host: CommandHost): void {
       }),
     })
 
-    widgetRunStarted(runId, workflow.name)
     const settle = (outcome: RunOutcome): void => {
       store.finish({ status: outcome.status, steps: outcome.steps })
       projector.runFinished(outcome.status === 'completed' ? 'completed' : 'error')
@@ -194,7 +205,7 @@ export function registerWorkflowCommand(host: CommandHost): void {
     const jobId = host.jobs.start({
       kind: 'workflow',
       label: `${workflow.name} (${runId})`,
-      owner: invocation.agent.id,
+      owner: agent.id,
       run(handle) {
         jobLine = (line) => {
           try {
@@ -345,7 +356,12 @@ export function registerWorkflowCommand(host: CommandHost): void {
           if (stored === undefined) return { kind: 'error', text: `no run "${target}" under ${join(cwd, '.dsh', 'workflow-runs')}` }
           workflowText = stored.workflowText
           inputs = stored.inputs ?? {}
-          if (sub === 'resume') prior = stored.steps
+          if (sub === 'resume') {
+            // L1 repair: steps without a terminal record get reconciled
+            // against their child sessions before becoming replay candidates.
+            await reconcileInterruptedSteps(host, stored.steps)
+            prior = stored.steps
+          }
         }
 
         try {
@@ -353,7 +369,7 @@ export function registerWorkflowCommand(host: CommandHost): void {
           // branch). resume/rerun load the system-written snapshot — no stem
           // to interlock against (real-host verified failure).
           const { workflow } = loadWorkflow(workflowText, sub === 'run' ? { filePath: target } : {})
-          return await executeRun(invocation, { workflow, yamlText: workflowText, inputs, wait, prior })
+          return await executeRunEx(invocation.agent, invocation.signal, { workflow, yamlText: workflowText, inputs, wait, prior })
         } catch (error) {
           if (error instanceof WorkflowLoadError) return { kind: 'error', text: error.message }
           return { kind: 'error', text: `${sub} failed: ${error instanceof Error ? error.message : String(error)}` }
@@ -363,4 +379,5 @@ export function registerWorkflowCommand(host: CommandHost): void {
       return { kind: 'error', text: `unknown subcommand "${sub}"\n${HELP}` }
     },
   }))
+  return { executeRun: executeRunEx, activeRuns }
 }
