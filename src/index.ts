@@ -48,6 +48,9 @@ export function apply(context: CommandHost): void {
         invocation: { modelInvocable: true, userInvocable: true },
         provider: 'dsh-workflow-config',
         source: 'bundled',
+        // Bundled-skill rank (tui-pi parity): the host validates the rank as
+        // a finite number — a missing one rejects the whole skill.
+        rank: 600,
         locator: bodyUrl,
       }]),
       async get() {
