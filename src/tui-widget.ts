@@ -10,7 +10,7 @@
  * @module @aiwayds/dsh-workflow/tui-widget
  */
 
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -94,6 +94,19 @@ export function flushWidgetFile(): void {
     mkdirSync(dirname(widgetFile()), { recursive: true })
     if (lines.length === 0) rmSync(widgetFile(), { force: true })
     else writeFileSync(widgetFile(), `${lines.join('\n')}\n`)
+    // Seed the personal workflow library with the bundled examples (idempotent:
+    // existing files are never overwritten — the library is user-owned).
+    try {
+      const libDir = join(dirname(widgetFile()), '..', 'workflows')
+      mkdirSync(libDir, { recursive: true })
+      const examplesDir = fileURLToPath(new URL('../examples/', import.meta.url))
+      for (const example of ['fan.workflow.yaml', 'dsh-plugin-wave.workflow.yaml']) {
+        const target = join(libDir, example)
+        if (!existsSync(target)) copyFileSync(join(examplesDir, example), target)
+      }
+    } catch {
+      /* seeding is a convenience, never a requirement */
+    }
     // The overlay manifest: points the tui's generic driver at this package's
     // state machine (absolute path — a bare specifier would resolve from the
     // importer's node_modules, which does not contain this package).
