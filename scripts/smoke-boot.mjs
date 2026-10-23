@@ -95,6 +95,7 @@ const boot = spawnSync('dsh', ['--profile', 'smoke'], {
 })
 const output = `${boot.stdout ?? ''}\n${boot.stderr ?? ''}`
 const loaderErrors = [
+  /did not activate/,
   /plugin tree failed to load/,
   /failed to apply loader entry/,
   /cannot get property ".*" without inject/,
