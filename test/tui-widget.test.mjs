@@ -19,7 +19,8 @@ test('no active runs renders nothing (the dock hides the widget)', () => {
 
 test('a running run renders a boxed panel: title, centered running step, tokens, hotkeys', () => {
   resetWidgetRuns()
-  widgetRunStarted('r1', 'fan')
+  const stepIds = Array.from({ length: 10 }, (_, i) => `step-${i}`)
+  widgetRunStarted('r1', 'fan', stepIds)
   // 10 steps with the RUNNING one mid-list: the window centers on it.
   for (let i = 0; i < 4; i++) widgetStepUpdate('r1', `step-${i}`, 'completed', 1000)
   widgetStepUpdate('r1', 'step-4', 'running', 500)
@@ -33,7 +34,7 @@ test('a running run renders a boxed panel: title, centered running step, tokens,
   // The window centers on the RUNNING step: earlier marker + 2 done above,
   // running in the middle, pending below.
   assert.equal(bodyRows[3], undefined || bodyRows[3], 'sanity')
-  assert.ok(bodyRows.some((l) => l.includes('▶ step-4')), 'running step in window')
+  assert.ok(bodyRows.some((l) => l.includes('step-4') && (l.includes('⠋') || l.includes('▶'))), 'running step in window (spinner or ▶)')
   assert.ok(bodyRows.some((l) => l.includes('… earlier')) === false || true)
   assert.match(lines.at(-1) ?? '', /╰/)
   assert.match(lines.join('\n'), /Ctrl\+K/)
@@ -41,7 +42,7 @@ test('a running run renders a boxed panel: title, centered running step, tokens,
 
 test('a settled run shows its terminal state, then ages out after the grace window', () => {
   resetWidgetRuns()
-  widgetRunStarted('r2', 'wave')
+  widgetRunStarted('r2', 'wave', ['solo'])
   widgetStepUpdate('r2', 'solo', 'completed', 100)
   widgetRunSettled('r2', 'completed')
   const now = Date.now()
@@ -54,7 +55,7 @@ test('a settled run shows its terminal state, then ages out after the grace wind
 
 test('failed runs render the ✗ marker and failed-step count', () => {
   resetWidgetRuns()
-  widgetRunStarted('r3', 'broken')
+  widgetRunStarted('r3', 'broken', ['a'])
   widgetStepUpdate('r3', 'a', 'failed')
   widgetRunSettled('r3', 'failed')
   widgetStepUpdate('r3', 'b', 'running')
@@ -66,7 +67,7 @@ test('failed runs render the ✗ marker and failed-step count', () => {
 test('wide CJK names are clipped to the terminal width, never wrapped', () => {
   resetWidgetRuns()
   const longName = '工作流'.repeat(30)
-  widgetRunStarted('r4', longName)
+  widgetRunStarted('r4', longName, ['s'])
   widgetStepUpdate('r4', 's', 'completed', 1)
   const lines = renderMini(40)
   for (const line of lines) {

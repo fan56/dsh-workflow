@@ -12,6 +12,9 @@ export type WidgetStepStatus = 'running' | 'completed' | 'failed' | 'skipped'
 export interface WidgetStepState {
   status: WidgetStepStatus
   totalTokens?: number
+  startedAt?: number
+  /** Child subagents dispatched by this step (foreach fan-out counts each). */
+  children?: number
 }
 
 export interface WidgetRunState {
@@ -20,6 +23,8 @@ export interface WidgetRunState {
   status: 'running' | 'completed' | 'failed'
   startedAt: number
   settledAt?: number
+  /** The workflow's full step list in definition order — pending steps render too. */
+  stepIds: string[]
   steps: Map<string, WidgetStepState>
 }
 
@@ -27,8 +32,8 @@ const active = new Map<string, WidgetRunState>()
 /** How long a settled run stays visible to the widget (ms). */
 const SETTLED_GRACE_MS = 60_000
 
-export function widgetRunStarted(runId: string, name: string): void {
-  active.set(runId, { runId, name, status: 'running', startedAt: Date.now(), steps: new Map() })
+export function widgetRunStarted(runId: string, name: string, stepIds: string[] = []): void {
+  active.set(runId, { runId, name, status: 'running', startedAt: Date.now(), stepIds, steps: new Map() })
 }
 
 export function widgetStepUpdate(
@@ -39,7 +44,23 @@ export function widgetStepUpdate(
 ): void {
   const run = active.get(runId)
   if (run === undefined) return
-  run.steps.set(stepId, { status, ...(totalTokens !== undefined ? { totalTokens } : {}) })
+  const existing = run.steps.get(stepId)
+  run.steps.set(stepId, {
+    status,
+    ...(totalTokens !== undefined ? { totalTokens } : {}),
+    ...(existing?.totalTokens !== undefined && totalTokens === undefined ? { totalTokens: existing.totalTokens } : {}),
+    startedAt: existing?.startedAt ?? (status === 'running' ? Date.now() : undefined),
+    ...(existing?.children !== undefined ? { children: existing.children } : {}),
+  })
+}
+
+/** Count one dispatched child subagent for a step (live-count evidence). */
+export function widgetStepChildBound(runId: string, stepId: string): void {
+  const run = active.get(runId)
+  if (run === undefined) return
+  const step = run.steps.get(stepId)
+  if (step === undefined) return
+  step.children = (step.children ?? 0) + 1
 }
 
 export function widgetRunSettled(runId: string, status: 'completed' | 'failed'): void {

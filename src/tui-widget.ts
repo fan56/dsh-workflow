@@ -20,23 +20,89 @@ import { snapshotWidgetRuns, widgetRunStarted, type WidgetRunState } from './run
 function clip(text: string, width: number): string {
   let visible = 0
   let end = text.length
-  for (let i = 0; i < text.length; i++) {
-    const code = text.codePointAt(i) ?? 0
-    visible += code > 0x2e80 ? 2 : 1
-    if (visible > width) {
-      end = i
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0
+    const w = code > 0x2e80 ? 2 : 1
+    if (visible + w > width) {
       break
     }
-    if (code > 0xffff) i++
+    visible += w
   }
-  const clipped = text.slice(0, end)
-  return visible > width ? `${clipped}…` : clipped
+  return text.slice(0, endOfVisible(text, width))
 }
 
-function fmtTokens(total: number): string {
-  if (total >= 1_000_000) return `${(total / 1_000_000).toFixed(1)}M`
-  if (total >= 1_000) return `${(total / 1_000).toFixed(1)}k`
-  return String(total)
+function endOfVisible(text: string, width: number): number {
+  let visible = 0
+  for (let i = 0; i < text.length; i++) {
+    const code = text.codePointAt(i) ?? 0
+    const w = code > 0x2e80 ? 2 : 1
+    if (visible + w > width) return i
+    visible += w
+    if (code > 0xffff) i++
+  }
+  return text.length
+}
+
+/** Visible width (CJK/fullwidth counts double). */
+function visibleWidth(text: string): number {
+  let visible = 0
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0
+    visible += code > 0x2e80 ? 2 : 1
+  }
+  return visible
+}
+
+/** Visible-width pad (CJK-aware, right border stays flush). */
+function padVisible(text: string, width: number): string {
+  const pad = width - visibleWidth(text)
+  return pad > 0 ? text + ' '.repeat(pad) : text
+}
+
+/** Visible-width clip from the LEFT (horizontal pan window). */
+function clipLeft(text: string, skip: number, width: number): string {
+  let out = ''
+  let visible = 0
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0
+    const w = code > 0x2e80 ? 2 : 1
+    if (visible >= skip && visible + w <= skip + width) out += ch
+    visible += w
+    if (visible >= skip + width) break
+  }
+  return out
+}
+
+/** Step-level icons; the running step renders a spinner frame instead. */
+function stepIcon(status: string, frame: number): string {
+  if (status === 'running') return SPINNER_FRAMES[frame % SPINNER_FRAMES.length]
+  return STATUS_ICON[status] ?? '○'
+}
+
+const STATUS_ICON: Record<string, string> = {
+  pending: '○',
+  running: '▶',
+  completed: '✅',
+  failed: '✗',
+  skipped: '⏭',
+}
+
+const RUN_ICON: Record<WidgetRunState['status'], string> = { running: '▶', completed: '✅', failed: '✗' }
+
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+
+const LABELS = {
+  en: { workflow: 'workflow', ungrouped: 'ungrouped', live: 'live', confirm: 'confirm' },
+  zh: { workflow: '工作流', ungrouped: '未分组', live: '进行中', confirm: '需确认' },
+} as const
+
+export type OverlayLocale = keyof typeof LABELS
+
+let overlayLocale: OverlayLocale = 'en'
+
+/** The widget's label language (the tui passes its active locale at boot). */
+export function setWidgetLocale(locale: OverlayLocale): void {
+  overlayLocale = locale
 }
 
 function keyOf(run: WidgetRunState): string {
@@ -51,61 +117,36 @@ function pickFocusedRun(runs: WidgetRunState[]): WidgetRunState | undefined {
   return runs[focusMode] ?? runs[0]
 }
 
-/** Content row budget of the panel (the user's spec: 7 lines). */
-const PANEL_ROWS = 7
+function fmtTokens(total: number): string {
+  if (total >= 1_000_000) return `${(total / 1_000_000).toFixed(1)}M`
+  if (total >= 1_000) return `${(total / 1_000).toFixed(1)}k`
+  return String(total)
+}
 
-/** Visible width (CJK/fullwidth counts double). */
-function visibleWidth(text: string): number {
-  let visible = 0
-  for (const ch of text) {
-    const code = ch.codePointAt(0) ?? 0
-    visible += code > 0x2e80 ? 2 : 1
+function fmtElapsed(ms: number): string {
+  const seconds = Math.floor(ms / 1000)
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}m${seconds % 60}s`
+  return `${seconds}s`
+}
+
+function renderStepLine(run: WidgetRunState, id: string, frame: number): string {
+  const step = run.steps.get(id)
+  const status = step?.status ?? 'pending'
+  const icon = stepIcon(status, frame)
+  const bits = [`${icon} ${id}`]
+  if (status === 'running') {
+    if (step?.children !== undefined && step.children > 0) bits.push(`subagent ×${step.children}`)
+    if (step?.startedAt !== undefined) bits.push(fmtElapsed(Date.now() - step.startedAt))
+  } else {
+    if (step?.totalTokens !== undefined) bits.push(`${fmtTokens(step.totalTokens)} tok`)
+    if (step?.children !== undefined && step.children > 0) bits.push(`⧉ ${step.children}`)
   }
-  return visible
+  return bits.join('  ')
 }
 
-/** Visible-width pad: spaces to the target width (CJK-aware). */
-function padVisible(text: string, width: number): string {
-  const pad = width - visibleWidth(text)
-  return pad > 0 ? text + ' '.repeat(pad) : text
-}
-
-/** Visible-width clip from the LEFT (horizontal scroll window). */
-function clipLeft(text: string, skip: number, width: number): string {
-  let out = ''
-  let visible = 0
-  for (const ch of text) {
-    const code = ch.codePointAt(0) ?? 0
-    const w = code > 0x2e80 ? 2 : 1
-    if (visible >= skip && visible + w <= skip + width) out += ch
-    visible += w
-    if (visible >= skip + width) break
-  }
-  return out
-}
-
-/** Step-level icons. */
-const STATUS_ICON: Record<string, string> = {
-  pending: '○',
-  running: '▶',
-  completed: '✅',
-  failed: '✗',
-  skipped: '⏭',
-}
-
-const RUN_ICON: Record<WidgetRunState['status'], string> = { running: '▶', completed: '✅', failed: '✗' }
-
-/**
- * Which run the widget shows. `auto` = oldest running run (falls back to
- * the oldest visible); a numeric focus pins a specific run until cycling
- * changes it. The tui's cycle hotkey writes "next" into the focus signal
- * file; the widget applies it on its next frame (state is this module's).
- */
 let focusMode: 'auto' | number = 'auto'
-/** Horizontal scroll offset (visible columns) — the left/right hotkey moves it. */
-let hScroll = 0
+let spinnerFrame = 0
 
-/** Apply a cycle signal from the tui keybinding (best-effort, no-op when <2 runs). */
 export function cycleWidgetFocus(now = Date.now()): void {
   const runs = snapshotWidgetRuns(now)
   if (runs.length < 2) return
@@ -114,19 +155,19 @@ export function cycleWidgetFocus(now = Date.now()): void {
   flushWidgetFile(now)
 }
 
-/** Reset to auto (a new run starting also resets the pin). */
 export function resetWidgetFocus(): void {
   focusMode = 'auto'
-  hScroll = 0
 }
+
+/** Content row budget of the panel (the user's spec: 7 lines). */
+const PANEL_ROWS = 7
 
 /**
  * Render the panel — ONE focused run per frame (auto = oldest running),
- * drawn as a boxed todos-style panel pinned above the input: fixed 7
- * content rows (title + 5 tree rows + hotkey footer), the RUNNING step
- * kept centered in the window, live subagent count right-aligned in the
- * title, left/right hotkeys panning the horizontal viewport over
- * truncated content.
+ * drawn as a boxed todos-style panel pinned above the input: 7 content
+ * rows (title + tree window + hotkey footer), the RUNNING step kept
+ * centered, the live subagent count right-aligned in the title, and a
+ * spinner on the running marker (the 250ms tick re-renders the file).
  */
 export function renderMini(width: number, now = Date.now()): string[] {
   const runs = snapshotWidgetRuns(now)
@@ -137,19 +178,19 @@ export function renderMini(width: number, now = Date.now()): string[] {
   const statuses = [...run.steps.values()]
   const completed = statuses.filter((s) => s.status === 'completed').length
   const failed = statuses.filter((s) => s.status === 'failed').length
-  const running = statuses.filter((s) => s.status === 'running').length
   const tokens = statuses.reduce((sum, s) => sum + (s.totalTokens ?? 0), 0)
+  const live = statuses.filter((s) => s.status === 'running').length
 
-  // Title row: left identity, right-aligned live count.
-  const titleLeft = `workflow: ${run.name}`
-  const titleRight = `${RUN_ICON[run.status]} ${running} live · ${fmtTokens(tokens)} tok`
+  const t = LABELS[overlayLocale]
+  const titleLeft = `${t.workflow}: ${run.name}`
+  const titleRight = `${RUN_ICON[run.status]} ${live} ${t.live} · ${fmtTokens(tokens)} tok`
 
   // Tree rows: top-level steps as primary branches, foreach children
   // (<parent>#<index>) nested under their foreach step.
   const rows: string[] = []
   const childMap = new Map<string, string[]>()
   const topIds: string[] = []
-  for (const id of run.steps.keys()) {
+  for (const id of run.stepIds) {
     const hashIdx = id.indexOf('#')
     if (hashIdx > 0) {
       const parent = id.slice(0, hashIdx)
@@ -159,67 +200,95 @@ export function renderMini(width: number, now = Date.now()): string[] {
       topIds.push(id)
     }
   }
+  const stepLine = (id: string): string => renderStepLine(run, id, spinnerFrame)
   topIds.forEach((id, i) => {
     const isLast = i === topIds.length - 1
-    const branch = isLast ? '└─ ' : '├─ '
-    rows.push(branch + stepRowText(run, id))
+    rows.push((isLast ? '└─ ' : '├─ ') + stepLine(id))
     const kids = childMap.get(id) ?? []
     kids.forEach((kid, j) => {
       const kidBranch = j === kids.length - 1 ? '└─ ' : '├─ '
-      const indent = isLast ? '   ' : '│  '
-      rows.push(indent + kidBranch + stepRowText(run, kid))
+      rows.push((isLast ? '   ' : '│  ') + kidBranch + stepLine(kid))
     })
   })
 
-  const hotkeys = `Alt+W 切换 · ←→ 拉动 · Ctrl+K 树${runs.length > 1 ? ` · run ${runs.findIndex((r) => r.runId === run.runId) + 1}/${runs.length}` : ''}`
+  const hotkeys = runs.length > 1
+    ? `${overlayLocale === 'zh' ? 'Alt+W 切换' : 'Alt+W cycle'} · ←→ ${overlayLocale === 'zh' ? '拉动' : 'pan'} · Ctrl+K ${overlayLocale === 'zh' ? '树' : 'tree'}`
+    : 'Ctrl+K tree'
 
-  // Body = title + tree rows + hotkey footer, windowed vertically so the
-  // RUNNING row stays inside the 7-row budget.
-  const body: string[] = [padVisible(titleLeft, Math.max(visibleWidth(titleLeft), width - visibleWidth(titleRight) - 4)) + titleRight]
+  // Body = title + tree window (RUNNING centered) + hotkey footer, within
+  // the 7-row budget (markers consume window rows).
+  const body: string[] = [`${titleLeft}  ${titleRight}`]
   const budget = PANEL_ROWS - 2
-  const runningTreeIdx = rows.findIndex((r) => r.includes('▶ ') && !r.includes('live'))
+  const runningTreeIdx = rows.findIndex((r) => r.includes('▶ ') || r.includes('⠋') || r.includes('⠙') || r.includes('⠸') || r.includes('⠼') || r.includes('⠴') || r.includes('⠦') || r.includes('⠧') || r.includes('⠇') || r.includes('⠏'))
   let start = 0
   if (rows.length > budget) {
-    const focusIdx = Math.max(0, runningTreeIdx)
-    start = Math.min(Math.max(0, focusIdx - Math.floor(budget / 2)), rows.length - budget)
+    start = Math.min(Math.max(0, Math.max(0, runningTreeIdx) - Math.floor(budget / 2)), rows.length - budget)
   }
   const windowed = rows.slice(start, start + budget)
+  if (start > 0) body.push(`  … ${start} ${overlayLocale === 'zh' ? '更早' : 'earlier'}`)
   body.push(...windowed)
-  if (windowStartHint(start, rows.length, budget) !== '') body.splice(1, 0, `  … ${start} earlier`)
-  const lastIdx = body.length - 1
-  if (start + budget < rows.length) {
-    body.splice(lastIdx, 0, `  … ${rows.length - start - budget} more`)
-  }
+  if (start + budget < rows.length) body.push(`  … ${rows.length - start - budget} more`)
   body.push(hotkeys)
 
   return frame(body, width, titleRight)
 }
 
-function windowStartHint(start: number, total: number, budget: number): string {
-  return start > 0 ? `… ${start} earlier` : ''
-}
-
-function stepRowText(run: WidgetRunState, id: string): string {
-  const st = run.steps.get(id)
-  if (st === undefined) return `${STATUS_ICON.pending} ${id}`
-  const icon = STATUS_ICON[st.status] ?? '○'
-  const bits = [`${icon} ${id}`]
-  if (st.totalTokens !== undefined) bits.push(`${fmtTokens(st.totalTokens)} tok`)
-
-  return bits.join('  ')
-}
-
-/** Frame the body rows: title row carries the right-aligned live count. */
 function frame(body: string[], width: number, titleRight: string): string[] {
   const inner = Math.max(width - 2, 20)
-  const top = `╭─ ${body[0] ?? ''} `
-  const topFill = Math.max(1, inner - visibleWidth(top) + 1)
-  const framed: string[] = [clip(top + '─'.repeat(topFill), inner + 2) + '╮']
+  // Title sides clip to fit so the top frame never exceeds the width
+  // (a 180-visible-width CJK name would otherwise blow the border out).
+  const titleLeft = clip(body[0] ?? '', Math.max(8, inner - visibleWidth(titleRight) - 8))
+  const fill = Math.max(1, inner - visibleWidth(titleLeft) - visibleWidth(titleRight) - 4)
+  const framed: string[] = [`╭─ ${titleLeft} ${'─'.repeat(fill)} ${titleRight} ─╮`]
   for (const line of body.slice(1)) {
     framed.push(`│ ${padVisible(clipLeft(line, hScroll, inner - 2), inner - 2)} │`)
   }
   framed.push(`╰${'─'.repeat(inner - 2)}╯`)
   return framed
+}
+
+let hScroll = 0
+
+/**
+ * The 250ms activity tick: advances the spinner and re-renders the widget
+ * file while a run is active (the animation is file-mtime driven — the
+ * tui re-reads on change). Started with the first run; stops after the
+ * grace window.
+ */
+export function startWidgetTicker(): void {
+  if (pollTimer !== undefined) return
+  pollTimer = setInterval(() => {
+    try {
+      // Cycle signal first.
+      const signalPath = cycleSignalFile()
+      if (existsSync(signalPath)) {
+        const content = readFileSync(signalPath, 'utf8').trim()
+        rmSync(signalPath, { force: true })
+        if (content === 'next') {
+          cycleWidgetFocus()
+          flushWidgetFile()
+          return
+        }
+      }
+      const runs = snapshotWidgetRuns()
+      if (runs.some((run) => run.status === 'running')) {
+        spinnerFrame += 1
+        flushWidgetFile()
+      } else {
+        stopWidgetTicker()
+      }
+    } catch {
+      /* the tick must never touch the run */
+    }
+  }, 250)
+  pollTimer.unref?.()
+}
+
+function stopWidgetTicker(): void {
+  if (pollTimer !== undefined) {
+    clearInterval(pollTimer)
+    pollTimer = undefined
+  }
 }
 
 const WIDGET_GRACE_MS = 60_000
@@ -235,32 +304,6 @@ export function cycleSignalFile(): string {
 }
 
 let pollTimer: ReturnType<typeof setInterval> | undefined
-
-function startFocusSignalPolling(): void {
-  if (pollTimer !== undefined) return
-  pollTimer = setInterval(() => {
-    try {
-      const signalPath = cycleSignalFile()
-      if (!existsSync(signalPath)) return
-      const content = readFileSync(signalPath, 'utf8').trim()
-      rmSync(signalPath, { force: true })
-      if (content === 'next') {
-        cycleWidgetFocus()
-        flushWidgetFile()
-      }
-    } catch {
-      /* polling must never touch the run */
-    }
-  }, 400)
-  pollTimer.unref?.()
-}
-
-function stopFocusSignalPolling(): void {
-  if (pollTimer !== undefined) {
-    clearInterval(pollTimer)
-    pollTimer = undefined
-  }
-}
 
 /** The widget lines file: `$DSH_HOME/tui-widgets/dsh-workflow.lines`. */
 export function widgetFile(): string {
@@ -280,9 +323,9 @@ let clearTimer: ReturnType<typeof setTimeout> | undefined
  */
 export function flushWidgetFile(now = Date.now()): void {
   const lines = renderMini(500, now)
-  // Cycle-signal polling lives only while a run is active.
-  if (snapshotWidgetRuns(now).some((run) => run.status === 'running')) startFocusSignalPolling()
-  else stopFocusSignalPolling()
+  // The ticker drives the spinner animation and the cycle signal while a
+  // run is active; it stops itself after the grace window.
+  startWidgetTicker()
   try {
     mkdirSync(dirname(widgetFile()), { recursive: true })
     if (lines.length === 0) rmSync(widgetFile(), { force: true })
