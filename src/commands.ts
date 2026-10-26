@@ -56,7 +56,7 @@ export interface CommandHost extends DispatchHost, JobsHost {
     section(section: { name: string; text: string; order?: number }): unknown
     getSectionOrder(anchor: string): number
   }
-  /** One-shot user questions (the /ws picker card; best-effort). */
+  /** One-shot user questions (the /wf picker card; best-effort). */
   userQuestions?: {
     ask(request: {
       questions: Array<{ id: string; question: string; header?: string; options?: Array<{ label: string; description?: string }> }>
@@ -120,7 +120,7 @@ function renderRunRow(row: { runId: string; status: string; name?: string; finis
   return `  ${row.runId}  ${row.status.padEnd(9)}  ${row.name ?? '?'}${row.finishedAt !== undefined ? `  (${row.finishedAt})` : ''}`
 }
 
-/** A workflow file candidate for /ws: workspace first, then the personal library. */
+/** A workflow file candidate for /wf: workspace first, then the personal library. */
 export interface WorkflowCandidate {
   file: string
   name: string
@@ -128,9 +128,9 @@ export interface WorkflowCandidate {
 }
 
 /**
- * Enumerate workflow files for /ws: the workspace root first, then the
+ * Enumerate workflow files for /wf: the workspace root first, then the
  * personal library ($DSH_HOME/workflows — seeded with examples at flush).
- * Stable sort order = the /ws numbering (1-based).
+ * Stable sort order = the /wf numbering (1-based).
  */
 export function enumerateWorkflows(cwd: string): WorkflowCandidate[] {
   const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
@@ -293,7 +293,7 @@ export function registerWorkflowCommand(host: CommandHost): RegisteredWorkflowCo
     }
   }
 
-  // /ws — the short entry: no argument opens the picker card (native user
+  // /wf — the short entry: no argument opens the picker card (native user
   // question); a number runs that workflow; "list" prints the numbered table.
   const wsLines = (candidates: WorkflowCandidate[]): string =>
     candidates.length === 0
@@ -301,8 +301,8 @@ export function registerWorkflowCommand(host: CommandHost): RegisteredWorkflowCo
       : candidates.map((c, i) => `  ${i + 1}. ${c.name}  ${c.description !== '' ? `— ${c.description}` : `(${c.file})`}`).join('\n')
 
   host.effect(() => host.commands.register({
-    name: 'ws',
-    description: 'Pick and run a workflow (dsh-workflow): /ws opens the picker, /ws <number> runs it, /ws list shows the table',
+    name: 'wf',
+    description: 'Pick and run a workflow (dsh-workflow): /wf opens the picker, /wf <number> runs it, /wf list shows the table',
     handler: async (invocation) => {
       const words = invocation.rawInput.trim().split(/\s+/).filter((w) => w !== '')
       const [sub, ...rest] = words
@@ -312,9 +312,9 @@ export function registerWorkflowCommand(host: CommandHost): RegisteredWorkflowCo
       if (sub === undefined || sub === '' || sub === 'help') {
         return { kind: 'success', text: [
           'usage:',
-          '  /ws                  pick a workflow (selection card)',
-          '  /ws <number>         run that workflow',
-          '  /ws list             the numbered table',
+          '  /wf                  pick a workflow (selection card)',
+          '  /wf <number>         run that workflow',
+          '  /wf list             the numbered table',
         ].join('\n') }
       }
 
@@ -335,7 +335,7 @@ export function registerWorkflowCommand(host: CommandHost): RegisteredWorkflowCo
       // Picker card (native user question) when no number was given.
       if (Number.isNaN(Number(sub))) {
         const userQuestions = host.userQuestions
-        if (userQuestions === undefined) return { kind: 'error', text: `no selection surface available — use /ws <number>:\n${wsLines(candidates)}` }
+        if (userQuestions === undefined) return { kind: 'error', text: `no selection surface available — use /wf <number>:\n${wsLines(candidates)}` }
         try {
           const { answers } = await userQuestions.ask({
             questions: [{
@@ -359,7 +359,7 @@ export function registerWorkflowCommand(host: CommandHost): RegisteredWorkflowCo
         }
       }
 
-      // /ws <number> — run that candidate.
+      // /wf <number> — run that candidate.
       const picked = candidates[number - 1]
       if (picked === undefined) return { kind: 'error', text: `no workflow numbered ${number}` }
       try {
