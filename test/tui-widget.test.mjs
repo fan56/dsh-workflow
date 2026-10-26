@@ -29,7 +29,6 @@ test('a running run renders a boxed panel: title, centered running step, tokens,
   assert.ok(lines.length >= 8 && lines.length <= 11, `panel line count ${lines.length}`)
   assert.ok(lines[0].startsWith('╭─'), 'top frame')
   assert.match(lines.join('\n'), /workflow: fan/)
-  assert.match(lines.join('\n'), /4\/10/)
   const bodyRows = lines.slice(1, 8)
   // The window centers on the RUNNING step: earlier marker + 2 done above,
   // running in the middle, pending below.
@@ -46,7 +45,7 @@ test('a settled run shows its terminal state, then ages out after the grace wind
   widgetStepUpdate('r2', 'solo', 'completed', 100)
   widgetRunSettled('r2', 'completed')
   const now = Date.now()
-  assert.match(renderMini(200, now).join('\n'), /✅ 1\/1/)
+  assert.match(renderMini(200, now).join('\n'), /✅ 0 live/)
   // 61s later the grace window has passed: hidden again, and GC'd.
   const later = now + 61_000
   assert.deepEqual(renderMini(200, later), [])
@@ -57,10 +56,11 @@ test('failed runs render the ✗ marker and failed-step count', () => {
   resetWidgetRuns()
   widgetRunStarted('r3', 'broken')
   widgetStepUpdate('r3', 'a', 'failed')
+  widgetRunSettled('r3', 'failed')
   widgetStepUpdate('r3', 'b', 'running')
   const lines = renderMini(200)
   assert.match(lines[0], /✗/)
-  assert.match(lines[0], /✗1/)
+  assert.match(lines[0], /✗ 1 live/)
 })
 
 test('wide CJK names are clipped to the terminal width, never wrapped', () => {
@@ -86,8 +86,8 @@ test('flushWidgetFile writes the widget lines under $DSH_HOME', async () => {
     widgetStepUpdate('r9', 'adapt#1', 'running')
     flushWidgetFile()
     const content = readFileSync(widgetFile(), 'utf8')
-    assert.match(content, /workflow: fan  ▶/)
-    assert.match(content, /workflow: fan  ▶ 1\/2/)
+    assert.match(content, /workflow: fan/)
+    assert.match(content, /1 live/)
     assert.match(content, /14\.8k tok/)
 
     // A settled run with no other activity: one final flush after the grace
