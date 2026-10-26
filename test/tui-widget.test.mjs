@@ -17,36 +17,34 @@ test('no active runs renders nothing (the dock hides the widget)', () => {
   assert.deepEqual(renderMini(80), [])
 })
 
-test('a running run renders a boxed panel: title, centered running step, tokens, hotkeys', () => {
+test('a running run renders the timeline: header summary, centered running step, hotkeys', () => {
   resetWidgetRuns()
   const stepIds = Array.from({ length: 10 }, (_, i) => `step-${i}`)
   widgetRunStarted('r1', 'fan', stepIds)
-  // 10 steps with the RUNNING one mid-list: the window centers on it.
   for (let i = 0; i < 4; i++) widgetStepUpdate('r1', `step-${i}`, 'completed', 1000)
   widgetStepUpdate('r1', 'step-4', 'running', 500)
   for (let i = 5; i < 10; i++) widgetStepUpdate('r1', `step-${i}`, 'pending')
   const lines = renderMini(200)
-  // Boxed: top + content rows (title + earlier + windowed steps + more + hotkey) + bottom.
-  assert.ok(lines.length >= 8 && lines.length <= 11, `panel line count ${lines.length}`)
-  assert.ok(lines[0].startsWith('╭─ '), 'top frame')
-  assert.match(lines.join('\n'), /workflow: fan/)
-  const bodyRows = lines.slice(1, 8)
-  // The window centers on the RUNNING step: earlier marker + 2 done above,
-  // running in the middle, pending below.
-  assert.equal(bodyRows[3], undefined || bodyRows[3], 'sanity')
-  assert.ok(bodyRows.some((l) => l.includes('step-4') && (l.includes('⠋') || l.includes('▶'))), 'running step in window (spinner or ▶)')
-  assert.ok(bodyRows.some((l) => l.includes('… earlier')) === false || true)
-  assert.match(lines.at(-1) ?? '', /╰/)
-  assert.match(lines.join('\n'), /Ctrl\+K/)
+  // 7 content rows: header + 5-step window + hotkey footer.
+  assert.ok(lines.length >= 8 && lines.length <= 11, `line count ${lines.length}`)
+  const joined = lines.join('\n')
+  assert.match(joined, /fan/)
+  assert.match(joined, /1 live/)
+  assert.match(joined, /4\.5k tok/)
+  // The RUNNING step is centered: window shows step-2..step-6.
+  assert.match(joined, /▸ step-4/)
+  assert.match(joined, /✅ step-2/)
+  assert.match(joined, /○ step-5/)
+  assert.match(joined, /… 2 more/)
+  assert.match(joined, /Ctrl\+K tree/)
 })
-
 test('a settled run shows its terminal state, then ages out after the grace window', () => {
   resetWidgetRuns()
   widgetRunStarted('r2', 'wave', ['solo'])
   widgetStepUpdate('r2', 'solo', 'completed', 100)
   widgetRunSettled('r2', 'completed')
   const now = Date.now()
-  assert.match(renderMini(200, now).join('\n'), /✅ 0 live/)
+  assert.match(renderMini(200, now).join('\n'), /✅ 1\/1/)
   // 61s later the grace window has passed: hidden again, and GC'd.
   const later = now + 61_000
   assert.deepEqual(renderMini(200, later), [])
@@ -61,7 +59,7 @@ test('failed runs render the ✗ marker and failed-step count', () => {
   widgetStepUpdate('r3', 'b', 'running')
   const lines = renderMini(200)
   assert.match(lines[0], /✗/)
-  assert.match(lines[0], /✗ 1 live/)
+  assert.match(lines[0], /✗ 0\/2/)
 })
 
 test('wide CJK names are clipped to the terminal width, never wrapped', () => {
@@ -87,7 +85,7 @@ test('flushWidgetFile writes the widget lines under $DSH_HOME', async () => {
     widgetStepUpdate('r9', 'adapt#1', 'running')
     flushWidgetFile()
     const content = readFileSync(widgetFile(), 'utf8')
-    assert.match(content, /workflow: fan/)
+    assert.match(content, /fan/)
     assert.match(content, /1 live/)
     assert.match(content, /14\.8k tok/)
 

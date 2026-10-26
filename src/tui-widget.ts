@@ -92,8 +92,8 @@ const RUN_ICON: Record<WidgetRunState['status'], string> = { running: '▶', com
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
 const LABELS = {
-  en: { workflow: 'workflow', ungrouped: 'ungrouped', live: 'live', confirm: 'confirm' },
-  zh: { workflow: '工作流', ungrouped: '未分组', live: '进行中', confirm: '需确认' },
+  en: { workflow: 'workflow', ungrouped: 'ungrouped', live: 'live', confirm: 'confirm', steps: 'steps' },
+  zh: { workflow: '工作流', ungrouped: '未分组', live: '进行中', confirm: '需确认', steps: '步' },
 } as const
 
 export type OverlayLocale = keyof typeof LABELS
@@ -162,12 +162,19 @@ export function resetWidgetFocus(): void {
 /** Content row budget of the panel (the user's spec: 7 lines). */
 const PANEL_ROWS = 7
 
+interface TreeRow {
+  text: string
+  depth: number
+  running: boolean
+  status: string
+  stepId?: string
+}
+
 /**
- * Render the panel — ONE focused run per frame (auto = oldest running),
- * drawn as a boxed todos-style panel pinned above the input: 7 content
- * rows (title + tree window + hotkey footer), the RUNNING step kept
- * centered, the live subagent count right-aligned in the title, and a
- * spinner on the running marker (the 250ms tick re-renders the file).
+ * Render the panel — the timeline view (web workflow-run node 的终端翻译):
+ * a summary header row, then the step tree with status dots, per-step agent
+ * counts, foreach expansions and the RUNNING step centered in the window.
+ * 7 content rows per the user's spec.
  */
 export function renderMini(width: number, now = Date.now()): string[] {
   const runs = snapshotWidgetRuns(now)
@@ -176,61 +183,118 @@ export function renderMini(width: number, now = Date.now()): string[] {
   if (focusMode !== 'auto' && !runs.some((r) => r.runId === keyOf(run))) focusMode = 'auto'
 
   const statuses = [...run.steps.values()]
-  const completed = statuses.filter((s) => s.status === 'completed').length
+  const totalSteps = statuses.length
+  const doneSteps = statuses.filter((s) => s.status === 'completed' || s.status === 'skipped').length
   const failed = statuses.filter((s) => s.status === 'failed').length
   const tokens = statuses.reduce((sum, s) => sum + (s.totalTokens ?? 0), 0)
   const live = statuses.filter((s) => s.status === 'running').length
+  const liveChildren = statuses.reduce((sum, s) => sum + (s.children ?? 0), 0)
 
   const t = LABELS[overlayLocale]
-  const titleLeft = `${t.workflow}: ${run.name}`
-  const titleRight = `${RUN_ICON[run.status]} ${live} ${t.live} · ${fmtTokens(tokens)} tok`
+  const runIcon = RUN_ICON[run.status]
 
-  // Tree rows: top-level steps as primary branches, foreach children
-  // (<parent>#<index>) nested under their foreach step.
-  const rows: string[] = []
-  const childMap = new Map<string, string[]>()
-  const topIds: string[] = []
-  for (const id of run.stepIds) {
-    const hashIdx = id.indexOf('#')
-    if (hashIdx > 0) {
-      const parent = id.slice(0, hashIdx)
-      if (!childMap.has(parent)) childMap.set(parent, [])
-      childMap.get(parent)!.push(id)
-    } else {
-      topIds.push(id)
+  // ---- Header row: summary ----
+  const headerLeft = `${run.name}`
+  const headerRight = `${runIcon} ${doneSteps}/${totalSteps} ${t.steps ?? 'steps'} · ${fmtTokens(tokens)} tok`
+  const header = joinRow(headerLeft, headerRight, width)
+
+  // ---- Tree rows ----
+  const treeRows: TreeRow[] = []
+  const pushStep = (id: string, depth: number, isLast: boolean, forceRunningIcon: boolean): void => {
+    const step = run.steps.get(id)
+    const status = step?.status ?? 'pending'
+    // No icon here: the assembly layer prepends the status marker (spinner
+    // for running) — one marker per row, never two.
+    const branch = depth === 0 ? '' : (isLast ? '└─ ' : '├─ ')
+    const name = id.includes('#') ? id.split('#')[1]! : id
+    let row = `${branch}${name}`
+    if (step?.children !== undefined && step.children > 0) row += `  ⬢ ${step.children}`
+    treeRows.push({ text: row, depth, running: status === 'running' || forceRunningIcon, status, stepId: id })
+    // foreach 子行:running/completed/pending 全列(总数小),超出窗口由滑动处理
+    if (step?.children !== undefined && step.children > 0 && depth === 0) {
+      // 子行在父正下方(定义序已按 #index 排列)
+      for (const kidId of run.steps.keys()) {
+        if (!kidId.startsWith(`${id}#`)) continue
+        pushStep(kidId, depth + 1, false, false)
+      }
     }
   }
-  const stepLine = (id: string): string => renderStepLine(run, id, spinnerFrame)
-  topIds.forEach((id, i) => {
-    const isLast = i === topIds.length - 1
-    rows.push((isLast ? '└─ ' : '├─ ') + stepLine(id))
-    const kids = childMap.get(id) ?? []
-    kids.forEach((kid, j) => {
-      const kidBranch = j === kids.length - 1 ? '└─ ' : '├─ '
-      rows.push((isLast ? '   ' : '│  ') + kidBranch + stepLine(kid))
+
+  // 深度优先展开(定义序=拓扑近似);foreach 子行跟父
+  const seen = new Set<string>()
+  const walk = (ids: string[], depth: number): void => {
+    ids.forEach((id, i) => {
+      if (seen.has(id)) return
+      seen.add(id)
+      if (id.includes('#')) return // 子步在父展开时列
+      const step = run.steps.get(id)
+      const isLastTop = i === ids.length - 1
+      pushStep(id, depth, isLastTop, false)
+      if (isForeachShape(id)) {
+        const kids = [...run.steps.keys()].filter((k) => k.startsWith(`${id}#`)).sort((a, b) => Number(a.split('#')[1]) - Number(b.split('#')[1]))
+        kids.forEach((kid, j) => {
+          if (seen.has(kid)) return
+          seen.add(kid)
+          pushStep(kid, depth + 1, j === kids.length - 1, false)
+        })
+      }
+      void step
+      void isLastTop
     })
-  })
-
-  const hotkeys = runs.length > 1
-    ? `${overlayLocale === 'zh' ? 'Alt+W 切换' : 'Alt+W cycle'} · ←→ ${overlayLocale === 'zh' ? '拉动' : 'pan'} · Ctrl+K ${overlayLocale === 'zh' ? '树' : 'tree'}`
-    : 'Ctrl+K tree'
-
-  // Body = title + tree window (RUNNING centered) + hotkey footer, within
-  // the 7-row budget (markers consume window rows).
-  const body: string[] = [`${titleLeft}  ${titleRight}`]
-  const budget = PANEL_ROWS - 2
-  const runningTreeIdx = rows.findIndex((r) => r.includes('▶ ') || r.includes('⠋') || r.includes('⠙') || r.includes('⠸') || r.includes('⠼') || r.includes('⠴') || r.includes('⠦') || r.includes('⠧') || r.includes('⠇') || r.includes('⠏'))
-  let start = 0
-  if (rows.length > budget) {
-    start = Math.min(Math.max(0, Math.max(0, runningTreeIdx) - Math.floor(budget / 2)), rows.length - budget)
   }
-  const windowed = rows.slice(start, start + budget)
-  if (start > 0) body.push(`  … ${start} ${overlayLocale === 'zh' ? '更早' : 'earlier'}`)
-  body.push(...windowed)
-  if (start + budget < rows.length) body.push(`  … ${rows.length - start - budget} more`)
-  body.push(hotkeys)
+  const isForeachShape = (id: string): boolean => id.includes('#')
+  // 占位避免未用告警
+  void isForeachShape
 
-  return frame(body, width)
+  walk(topIdsFromRun(run), 0)
+
+  // ---- 窗口:RUNNING 行居中 ----
+  const runningRowIdx = treeRows.findIndex((r) => r.running)
+  let start = 0
+  if (treeRows.length > PANEL_ROWS - 1) {
+    const center = runningRowIdx >= 0 ? runningRowIdx : 0
+    start = Math.min(Math.max(0, center - Math.floor((PANEL_ROWS - 2) / 2)), treeRows.length - (PANEL_ROWS - 1))
+  }
+  const windowed = treeRows.slice(start, start + PANEL_ROWS - 1)
+
+  // ---- 组装 7 行 ----
+  const lines: string[] = []
+  lines.push(joinRow(`${run.name}  ${runIcon} ${run.status === 'running' ? `${live} ${t.live}` : `${doneSteps}/${totalSteps}`}`, `${fmtTokens(tokens)} tok`, width))
+  // earlier/more 标记计入 7 行预算(窗放不下时各占一行)
+  if (start > 0) {
+    lines.push(joinRow(`… ${start} ${overlayLocale === 'zh' ? '更早' : 'earlier'}`, '', width))
+  }
+  for (const row of windowed) {
+    const indent = '  '.repeat(row.depth)
+    const marker = row.running ? '▸ ' : row.status === 'pending' ? '○ ' : (STATUS_ICON[row.status] ?? '') + ' '
+    const branch = row.depth === 0 ? marker : ''
+    lines.push(joinRow(`${indent}${branch}${row.text}`, '', width))
+  }
+  const remaining = treeRows.length - start - windowed.length
+  if (remaining > 0) {
+    lines.push(joinRow(`… ${remaining} ${overlayLocale === 'zh' ? '更多' : 'more'}`, '', width))
+  }
+  const footer = runs.length > 1
+    ? `Alt+W ${overlayLocale === 'zh' ? '切换' : 'cycle'} (${runs.findIndex((r) => r.runId === run.runId) + 1}/${runs.length}) · ←→ pan · Ctrl+K`
+    : 'Ctrl+K tree'
+  lines.push(joinRow(footer, '', width))
+  return lines
+}
+
+function topIdsFromRun(run: WidgetRunState): string[] {
+  return run.stepIds.filter((id) => !id.includes('#'))
+}
+
+function isForeachShape(id: string): boolean {
+  return id.includes('#')
+}
+
+/** 左文本 + 右对齐右段(可见宽计算,CJK 安全)。 */
+function joinRow(left: string, right: string, width: number): string {
+  const inner = Math.max(width - 2, 20)
+  const leftClipped = clip(left, Math.max(8, inner - visibleWidth(right) - 2))
+  const pad = Math.max(1, inner - visibleWidth(leftClipped) - visibleWidth(right))
+  return `${leftClipped}${' '.repeat(pad)}${right}`
 }
 
 function frame(body: string[], width: number): string[] {
