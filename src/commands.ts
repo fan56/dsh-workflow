@@ -17,6 +17,7 @@
  */
 
 import { readFileSync, readdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { WorkflowLoadError } from './errors.ts'
@@ -54,6 +55,14 @@ export interface CommandHost extends DispatchHost, JobsHost {
   systemPrompt: {
     section(section: { name: string; text: string; order?: number }): unknown
     getSectionOrder(anchor: string): number
+  }
+  /** One-shot user questions (the /ws picker card; best-effort). */
+  userQuestions?: {
+    ask(request: {
+      questions: Array<{ id: string; question: string; header?: string; options?: Array<{ label: string; description?: string }> }>
+      agent?: Agent
+      signal?: AbortSignal
+    }): Promise<{ answers: Array<{ id: string; selected: string[] }> }>
   }
   commands: {
     register(definition: {
@@ -109,6 +118,51 @@ function renderOutcome(outcome: RunOutcome): string {
 
 function renderRunRow(row: { runId: string; status: string; name?: string; finishedAt?: string }): string {
   return `  ${row.runId}  ${row.status.padEnd(9)}  ${row.name ?? '?'}${row.finishedAt !== undefined ? `  (${row.finishedAt})` : ''}`
+}
+
+/** A workflow file candidate for /ws: workspace first, then the personal library. */
+export interface WorkflowCandidate {
+  file: string
+  name: string
+  description: string
+}
+
+/**
+ * Enumerate workflow files for /ws: the workspace root first, then the
+ * personal library ($DSH_HOME/workflows — seeded with examples at flush).
+ * Stable sort order = the /ws numbering (1-based).
+ */
+export function enumerateWorkflows(cwd: string): WorkflowCandidate[] {
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  const dirs = [cwd, join(home, 'workflows')]
+  const out: WorkflowCandidate[] = []
+  const seen = new Set<string>()
+  for (const dir of dirs) {
+    let entries: string[]
+    try {
+      entries = readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const file of entries.filter((f) => f.endsWith('.workflow.yaml') || f.endsWith('.workflow.yml')).sort()) {
+      if (seen.has(file)) continue
+      try {
+        const head = readFileSync(join(dir, file), 'utf8').split('\n').slice(0, 40)
+        const nameLine = head.find((l) => l.startsWith('name:'))
+        if (nameLine === undefined) continue
+        seen.add(file)
+        const descLine = head.find((l) => l.startsWith('description:'))
+        out.push({
+          file: join(dir, file),
+          name: nameLine.slice(5).trim(),
+          description: descLine !== undefined ? descLine.slice(12).trim() : '',
+        })
+      } catch {
+        /* unreadable files just don't appear */
+      }
+    }
+  }
+  return out
 }
 
 export interface RegisteredWorkflowCommand {
@@ -238,6 +292,86 @@ export function registerWorkflowCommand(host: CommandHost): RegisteredWorkflowCo
       text: `workflow "${workflow.name}" started in background — run ${runId}, job ${jobId}. Watch: /workflow show ${runId} · Stop: /workflow stop ${runId}`,
     }
   }
+
+  // /ws — the short entry: no argument opens the picker card (native user
+  // question); a number runs that workflow; "list" prints the numbered table.
+  const wsLines = (candidates: WorkflowCandidate[]): string =>
+    candidates.length === 0
+      ? 'no workflows found — create a <name>.workflow.yaml in the workspace (or ~/.dsh/workflows/), or ask me to write one'
+      : candidates.map((c, i) => `  ${i + 1}. ${c.name}  ${c.description !== '' ? `— ${c.description}` : `(${c.file})`}`).join('\n')
+
+  host.effect(() => host.commands.register({
+    name: 'ws',
+    description: 'Pick and run a workflow (dsh-workflow): /ws opens the picker, /ws <number> runs it, /ws list shows the table',
+    handler: async (invocation) => {
+      const words = invocation.rawInput.trim().split(/\s+/).filter((w) => w !== '')
+      const [sub, ...rest] = words
+      const cwd = process.cwd()
+      const candidates = enumerateWorkflows(cwd)
+
+      if (sub === undefined || sub === '' || sub === 'help') {
+        return { kind: 'success', text: [
+          'usage:',
+          '  /ws                  pick a workflow (selection card)',
+          '  /ws <number>         run that workflow',
+          '  /ws list             the numbered table',
+        ].join('\n') }
+      }
+
+      if (sub === 'list') {
+        return { kind: 'success', text: wsLines(candidates) }
+      }
+
+      const number = Number(sub)
+      if (!Number.isInteger(number) || number < 1 || number > candidates.length) {
+        // Not a number (or out of range): if a picker can be shown, fall
+        // through to it; otherwise print the table so the user can pick.
+        const userQuestions = host.userQuestions
+        if (!Number.isNaN(number) || userQuestions === undefined) {
+          return { kind: 'error', text: `${sub === sub.replace(/\D/g, '') && sub !== '' ? `no workflow numbered "${sub}"` : 'unknown argument'} — pick from:\n${wsLines(candidates) || '(none)'}` }
+        }
+      }
+
+      // Picker card (native user question) when no number was given.
+      if (Number.isNaN(Number(sub))) {
+        const userQuestions = host.userQuestions
+        if (userQuestions === undefined) return { kind: 'error', text: `no selection surface available — use /ws <number>:\n${wsLines(candidates)}` }
+        try {
+          const { answers } = await userQuestions.ask({
+            questions: [{
+              id: 'workflow-pick',
+              question: 'Run which workflow?',
+              header: 'workflows',
+              options: candidates.map((c, i) => ({ label: `${i + 1}. ${c.name}`, description: c.description !== '' ? c.description : c.file })),
+            }],
+            agent: invocation.agent,
+            signal: invocation.signal,
+          })
+          const selected = answers[0]?.selected[0]
+          const index = Number(selected?.split('.')[0])
+          if (!Number.isInteger(index) || index < 1 || index > candidates.length) return { kind: 'error', text: 'pick cancelled' }
+          const picked = candidates[index - 1]!
+          const yamlText = readFileSync(picked.file, 'utf8')
+          const { workflow } = loadWorkflow(yamlText)
+          return await executeRunEx(invocation.agent, invocation.signal, { workflow, yamlText, inputs: {}, wait: false })
+        } catch (error) {
+          return { kind: 'error', text: `pick failed: ${error instanceof Error ? error.message : String(error)}` }
+        }
+      }
+
+      // /ws <number> — run that candidate.
+      const picked = candidates[number - 1]
+      if (picked === undefined) return { kind: 'error', text: `no workflow numbered ${number}` }
+      try {
+        const yamlText = readFileSync(picked.file, 'utf8')
+        const { workflow } = loadWorkflow(yamlText)
+        return await executeRunEx(invocation.agent, invocation.signal, { workflow, yamlText, inputs: {}, wait: false })
+      } catch (error) {
+        if (error instanceof WorkflowLoadError) return { kind: 'error', text: error.message }
+        return { kind: 'error', text: `run failed: ${error instanceof Error ? error.message : String(error)}` }
+      }
+    },
+  }))
 
   host.effect(() => host.commands.register({
     name: 'workflow',
