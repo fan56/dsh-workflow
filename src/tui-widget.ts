@@ -41,6 +41,15 @@ function fmtTokens(total: number): string {
 
 const RUN_ICON: Record<WidgetRunState['status'], string> = { running: '▶', completed: '✅', failed: '✗' }
 
+/** Step-level icons (superset of the run icons — pending/skipped steps render too). */
+const STATUS_ICON: Record<string, string> = {
+  pending: '○',
+  running: '▶',
+  completed: '✅',
+  failed: '✗',
+  skipped: '⏭',
+}
+
 /**
  * Which run the widget shows. `auto` = oldest running run (falls back to
  * the oldest visible); a numeric focus pins a specific run until cycling
@@ -63,16 +72,76 @@ export function resetWidgetFocus(): void {
   focusMode = 'auto'
 }
 
-/** Render the mini lines — ONE run per frame: the focused run (auto = oldest running). */
+/** Content row budget of the panel (the user's spec: 7 lines). */
+const PANEL_ROWS = 7
+
+/**
+ * Render the panel — ONE focused run per frame (auto = oldest running),
+ * drawn as a boxed panel pinned above the input: fixed 7 content rows,
+ * the RUNNING step kept centered in the step window, hotkeys on the
+ * footer row. The lines file carries the whole framed panel.
+ */
 export function renderMini(width: number, now = Date.now()): string[] {
   const runs = snapshotWidgetRuns(now)
   const run = pickFocusedRun(runs)
   if (run === undefined) return []
   if (focusMode !== 'auto' && !runs.some((r) => r.runId === keyOf(run))) focusMode = 'auto'
-  const lines: string[] = []
-  const others = runs.length - 1
-  lines.push(renderRunLine(run, width, others > 0 ? `(${runs.indexOf(run) + 1}/${runs.length})` : undefined))
-  return lines
+
+  const statuses = [...run.steps.values()]
+  const stepIds = [...run.steps.keys()]
+  const completed = statuses.filter((s) => s.status === 'completed').length
+  const failed = statuses.filter((s) => s.status === 'failed').length
+  const tokens = statuses.reduce((sum, s) => sum + (s.totalTokens ?? 0), 0)
+
+  const icon = RUN_ICON[run.status]
+  // Title row.
+  const titleBits = [`workflow: ${run.name}`, `${icon} ${completed}/${statuses.length}`]
+  if (failed > 0) titleBits.push(`✗${failed}`)
+  titleBits.push(`· ${fmtTokens(tokens)} tok`)
+  if (runs.length > 1) {
+    const idx = runs.findIndex((r) => r.runId === run.runId)
+    titleBits.push(`run ${idx + 1}/${runs.length}`)
+  }
+  const title = titleBits.join('  ')
+
+  // Step window: PANEL_ROWS - 2 (title + hotkey footer) rows, the RUNNING
+  // step kept centered — "执行的任务永远在中间". The `… earlier` / `… more`
+  // markers CONSUME window rows (they are part of the 7-line budget).
+  const stepBudget = PANEL_ROWS - 2
+  const runningIdx = stepIds.findIndex((id) => run.steps.get(id)?.status === 'running')
+  let windowStart: number
+  if (stepIds.length <= stepBudget) windowStart = 0
+  else if (runningIdx >= 0) windowStart = Math.min(Math.max(0, runningIdx - Math.floor(stepBudget / 2)), stepIds.length - stepBudget)
+  else windowStart = Math.max(0, stepIds.length - stepBudget)
+  const windowed = stepIds.slice(windowStart, windowStart + stepBudget)
+
+  // Body lines: title + step rows (+ markers inside the step budget) + hotkey.
+  const bodyLines: string[] = [title]
+  if (windowStart > 0) bodyLines.push(`  … ${windowStart} earlier`)
+  for (const id of windowed) {
+    if (bodyLines.length >= PANEL_ROWS - 1) break
+    const st = run.steps.get(id)!
+    const icon = STATUS_ICON[st.status === 'running' ? 'running' : st.status]
+    const bits = [`${icon} ${id}`]
+    if (st.totalTokens !== undefined) bits.push(`${fmtTokens(st.totalTokens)} tok`)
+    bodyLines.push(clip(`  ${bits.join('  ')}`, Math.max(width - 4, 20)))
+  }
+  if (windowStart + stepBudget < stepIds.length) {
+    if (bodyLines.length >= PANEL_ROWS - 1) bodyLines.pop()
+    bodyLines.push(`  … ${stepIds.length - windowStart - stepBudget} more`)
+  }
+  const hotkeys = runs.length > 1 ? 'Alt+W 切换 run · Ctrl+K 树' : 'Ctrl+K 树'
+  bodyLines.push(hotkeys)
+
+  // Frame to width.
+  const inner = Math.max(width - 2, 20)
+  const framed: string[] = []
+  framed.push(clip(`╭─ ${bodyLines[0]!.trim()} `, inner).replace(/([^─])$/, '$1─') + '╮')
+  for (const line of bodyLines.slice(1)) {
+    framed.push(`│ ${clip(line, inner - 2).padEnd(inner - 2)} │`)
+  }
+  framed.push(`╰${'─'.repeat(inner - 2)}╯`)
+  return framed
 }
 
 function keyOf(run: WidgetRunState): string {
@@ -85,45 +154,6 @@ function pickFocusedRun(runs: WidgetRunState[]): WidgetRunState | undefined {
     return runs.find((run) => run.status === 'running') ?? runs[0]
   }
   return runs[focusMode] ?? runs[0]
-}
-
-function renderRunLine(run: WidgetRunState, width: number, position?: string): string {
-  const statuses = [...run.steps.values()]
-  const completed = statuses.filter((s) => s.status === 'completed').length
-  const failed = statuses.filter((s) => s.status === 'failed').length
-  const running = statuses.filter((s) => s.status === 'running').length
-  const tokens = statuses.reduce((sum, s) => sum + (s.totalTokens ?? 0), 0)
-  const current = [...run.steps.entries()].filter(([, s]) => s.status === 'running').map(([id]) => id).at(-1)
-  const icon = RUN_ICON[run.status]
-  const parts = [
-    `▸ workflow: ${run.name}`,
-    `${icon} ${donePart(run.status, statuses.length, completed, failed, running)}`,
-    ...(current !== undefined ? [`▸ ${current}`] : []),
-    ...(position !== undefined ? [position] : []),
-    ...(tokens > 0 ? [`· ${fmtTokens(tokens)} tok`] : []),
-  ]
-  return clip(parts.join('  '), Math.max(width, 20))
-}
-
-/** Legacy multi-line render kept for tests/tools (one line per run). */
-export function renderMiniLines(width: number, now = Date.now()): string[] {
-  const lines: string[] = []
-  for (const run of snapshotWidgetRuns(now).slice(0, 3)) {
-    const statuses = [...run.steps.values()]
-    const completed = statuses.filter((s) => s.status === 'completed').length
-    const failed = statuses.filter((s) => s.status === 'failed').length
-    const running = statuses.filter((s) => s.status === 'running').length
-    const tokens = statuses.reduce((sum, s) => sum + (s.totalTokens ?? 0), 0)
-    const current = [...run.steps.entries()].filter(([, s]) => s.status === 'running').map(([id]) => id).at(-1)
-    const parts = [
-      `▸ workflow: ${run.name}`,
-      `${RUN_ICON[run.status]} ${donePart(run.status, statuses.length, completed, failed, running)}`,
-      ...(current !== undefined ? [`▸ ${current}`] : []),
-      ...(tokens > 0 ? [`· ${fmtTokens(tokens)} tok`] : []),
-    ]
-    lines.push(clip(parts.join('  '), Math.max(width, 20)))
-  }
-  return lines
 }
 
 function donePart(status: WidgetRunState['status'], total: number, completed: number, failed: number, running: number): string {
