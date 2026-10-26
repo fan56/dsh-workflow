@@ -108,7 +108,8 @@ steps:
   const outcomeFail = await runYaml(base.replace('MODE', 'fail'), [new Error('boom')]).promise
   assert.equal(outcomeFail.status, 'failed')
   assert.equal(outcomeFail.steps.boom.status, 'failed')
-  assert.equal(outcomeFail.steps.after, undefined)
+  // Seed now records every step up front: an undispatched step stays 'pending'.
+  assert.equal(outcomeFail.steps.after?.status, 'pending')
 
   const skipped = await runYaml(base.replace('MODE', 'skip'), [new Error('x')]).promise
   assert.equal(skipped.steps.boom.status, 'skipped')

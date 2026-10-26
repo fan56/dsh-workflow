@@ -14,7 +14,7 @@
 
 import { WorkflowRunError, RosterError } from './errors.ts'
 import { resolveOverArray, resolveTemplate, type RefScope } from './refs.ts'
-import { isForeachStep, type AnyStepDef, type StepDef, type WorkflowDef } from './types.ts'
+import { isForeachStep, type AnyStepDef, type ForeachStepDef, type StepDef, type WorkflowDef } from './types.ts'
 import type { UsageSummary } from './cost.ts'
 
 /** What one dispatch attempt must produce. Mirrors the host's SubagentResult shape. */
@@ -38,7 +38,7 @@ export interface DispatchRequest {
 
 export type DispatchFn = (request: DispatchRequest) => Promise<DispatchOutcome>
 
-export type StepStatus = 'completed' | 'failed' | 'skipped'
+export type StepStatus = 'pending' | 'completed' | 'failed' | 'skipped'
 
 export interface StepOutcome {
   id: string
@@ -234,16 +234,67 @@ export function createEngine(options: EngineOptions): Engine {
       const orderedIds = topoOrder(workflow.steps)
       const byId = new Map(workflow.steps.map((s) => [s.id, s]))
 
+      // Concurrent scheduling: every READY step (all needs terminal) is in
+      // flight up to maxConcurrency; each completion pulls the next ready
+      // step. Independent steps overlap; needs chains stay ordered.
+      const maxConcurrency = Math.max(1, DEFAULT_MAX_CONCURRENCY)
+      const inFlight = new Map<string, Promise<void>>()
+      let cursor = 0
+      let stopDispatching = false
+      let runFailed = false
+
+      // Seed every outcome record up front (render references and cascade
+      // checks read them while later steps are still pending).
       for (const id of orderedIds) {
-        const step = byId.get(id)!
-        const outcome: StepOutcome = { id, status: 'completed', attempts: 0 }
+        const outcome: StepOutcome = { id, status: 'pending', attempts: 0 }
         steps[id] = outcome
-        // References prefer the structured result: `{{steps.x.output.items}}`
-        // must traverse the validated object, not the rendered text.
         scope.steps[id] = {
           get output() { return outcome.structured ?? outcome.output },
           get 'action-output'() { return outcome.actionOutput },
         }
+      }
+
+      /** A step is dispatchable when every need reached a terminal state. */
+      const isDispatchable = (step: StepDef): boolean =>
+        (step.needs ?? []).every((dep) => {
+          const depOutcome = steps[dep]
+          return depOutcome !== undefined && depOutcome.status !== 'pending'
+        })
+
+      /** Pre-dispatch gates. Returns run | skip | stop. */
+      const preflight = async (step: StepDef, outcome: StepOutcome): Promise<'run' | 'skip' | 'stop'> => {
+        const skippedDep = (step.needs ?? []).find((dep) => steps[dep] !== undefined && steps[dep]!.status === 'skipped')
+        if (skippedDep !== undefined) {
+          outcome.status = 'skipped'
+          outcome.error = `dependency "${skippedDep}" was skipped`
+          return 'skip'
+        }
+        if (step.confirm === true && runOptions.confirm !== undefined) {
+          const granted = await runOptions.confirm(step.id)
+          if (!granted) {
+            outcome.status = 'skipped'
+            outcome.error = 'confirmation declined'
+            return 'skip'
+          }
+        }
+        return 'run'
+      }
+
+      const applyOnError = (step: StepDef, outcome: StepOutcome): void => {
+        if (outcome.status !== 'failed') return
+        const onError = step['on-error'] ?? 'fail'
+        if (onError === 'fail') {
+          runFailed = true
+          stopDispatching = true
+        } else if (onError === 'skip') {
+          outcome.status = 'skipped'
+        }
+        // `continue` keeps the failed state and lets dependents see it.
+      }
+
+      const runOne = async (id: string): Promise<void> => {
+        const step = byId.get(id) as StepDef
+        const outcome = steps[id]!
         runOptions.observers?.stepStarted?.(id)
 
         // Checkpoint replay (resume): a prior completed outcome for this
@@ -252,149 +303,164 @@ export function createEngine(options: EngineOptions): Engine {
         if (prior !== undefined && prior.status === 'completed' && (step.cache ?? 'on-failure') !== 'never') {
           Object.assign(outcome, prior, { replayed: true })
           runOptions.observers?.stepSettled?.(outcome)
-          continue
+          return
+        }
+
+        const verdict = await preflight(step, outcome)
+        if (verdict !== 'run') {
+          runOptions.observers?.stepSettled?.(outcome)
+          return
         }
 
         if (isForeachStep(step)) {
-          const over = step.foreach.over.replace(/^\{\{/, '').replace(/\}\}$/, '')
-          const resolved = resolveOverArray(over, scope)
-          if (!resolved.ok) {
-            outcome.status = 'failed'
-            outcome.error = `foreach.over unusable: ${resolved.reason}`
-            runOptions.observers?.stepSettled?.(outcome)
-            if ((step['on-error'] ?? 'fail') === 'fail') return { runId, status: 'failed', steps }
-            if (step['on-error'] === 'skip') outcome.status = 'skipped'
-            continue
-          }
-
-          // Bounded fan-out: workflow-layer semaphore (children queue beyond
-          // max-concurrency — never bet on the host's overflow behavior).
-          const concurrency = step.foreach['max-concurrency'] ?? DEFAULT_MAX_CONCURRENCY
-          const childTemplate = step.foreach.step
-          let running = 0
-          const waiters: Array<() => void> = []
-          const acquire = async (): Promise<void> => {
-            if (running < concurrency) {
-              running += 1
-              return
-            }
-            await new Promise<void>((release) => waiters.push(release))
-            running += 1
-          }
-          const release = (): void => {
-            running -= 1
-            waiters.shift()?.()
-          }
-          let stopDispatching = false
-          const childOutcomes: StepOutcome[] = []
-          await Promise.all(resolved.items.map(async (item, index) => {
-            if (stopDispatching) return
-            await acquire()
-            if (stopDispatching) {
-              release()
-              return
-            }
-            try {
-              const childId = `${id}#${index}`
-              const childOutcome: StepOutcome = { id: childId, status: 'completed', attempts: 0 }
-              childOutcomes[index] = childOutcome
-              steps[childId] = childOutcome
-              scope.steps[childId] = { get output() { return childOutcome.output }, get 'action-output'() { return childOutcome.actionOutput } }
-              runOptions.observers?.stepStarted?.(childId)
-              const childPrior = runOptions.prior?.[childId]
-              if (childPrior !== undefined && childPrior.status === 'completed' && (childTemplate.cache ?? 'on-failure') !== 'never') {
-                Object.assign(childOutcome, childPrior, { replayed: true })
-              } else {
-                await runStep({ ...childTemplate, id: childId } as StepDef, { inputs: scope.inputs, steps: scope.steps, item }, childOutcome, runOptions)
-              }
-              runOptions.observers?.stepSettled?.(childOutcome)
-              if (childOutcome.status === 'failed' && (childTemplate['on-error'] ?? 'fail') === 'fail') {
-                // Fail-fast fan-out: no NEW items dispatch; in-flight ones settle.
-                stopDispatching = true
-              }
-            } finally {
-              release()
-            }
-          }))
-
-          const settled = childOutcomes.filter((o) => o !== undefined)
-          const failed = settled.filter((o) => o.status === 'failed').length
-          const completed = settled.length - failed
-          const summary = {
-            total: resolved.items.length,
-            completed,
-            failed,
-            notDispatched: resolved.items.length - settled.length,
-            items: settled.map((o) => ({
-              index: Number(o.id.split('#')[1]),
-              status: o.status,
-              ...(o.replayed === true ? { replayed: true } : {}),
-              ...(o.output !== undefined ? { output: o.output.slice(0, 2000) } : {}),
-              ...(o.error !== undefined ? { error: o.error } : {}),
-            })),
-          }
-          outcome.status = settled.length > 0 && failed === settled.length ? 'failed' : 'completed'
-          if (outcome.status === 'failed' && stopDispatching) {
-            outcome.error = `fail-fast fan-out stopped after ${settled.length}/${resolved.items.length} items`
-          }
-          outcome.output = JSON.stringify(summary)
-          outcome.structured = summary
-          if (outcome.status === 'failed') {
-            const onError = step['on-error'] ?? 'fail'
-            runOptions.observers?.stepSettled?.(outcome)
-            if (onError === 'fail') return { runId, status: 'failed', steps }
-            if (onError === 'skip') outcome.status = 'skipped'
-            continue
-          }
-          runOptions.observers?.stepSettled?.(outcome)
-          continue
+          await runForeachStep(step as ForeachStepDef, outcome)
+        } else {
+          await runStep(step as StepDef, { inputs: scope.inputs, steps: scope.steps }, outcome, runOptions)
         }
 
-        // A skipped upstream cascades: its outputs never existed, so this
-        // step cannot run meaningfully. A *failed* upstream under
-        // `on-error: continue` does NOT cascade — "continue" means the run
-        // carries on; a prompt that references the failed step's output will
-        // fail loudly at render time with the precise missing reference.
-        const skippedDep = (step.needs ?? []).find((dep) => steps[dep] !== undefined && steps[dep]!.status === 'skipped')
-        if (skippedDep !== undefined) {
-          outcome.status = 'skipped'
-          outcome.error = `dependency "${skippedDep}" was skipped`
-          runOptions.observers?.stepSettled?.(outcome)
-          continue
-        }
-
-        if (step.confirm === true) {
-          const granted = runOptions.confirm === undefined ? true : await runOptions.confirm(id)
-          if (!granted) {
-            outcome.status = 'skipped'
-            outcome.error = 'confirmation declined'
-            runOptions.observers?.stepSettled?.(outcome)
-            continue
-          }
-        }
-
-        await runStep(step, { inputs: scope.inputs, steps: scope.steps }, outcome, runOptions)
-
-        if (outcome.status === 'failed') {
-          const onError = step['on-error'] ?? 'fail'
-          if (onError === 'fail') {
-            runOptions.observers?.stepSettled?.(outcome)
-            return { runId, status: 'failed', steps }
-          }
-          if (onError === 'skip') {
-            outcome.status = 'skipped'
-          }
-          // `continue` keeps the failed state and lets dependents see it.
-        }
+        applyOnError(step, outcome)
         runOptions.observers?.stepSettled?.(outcome)
+        if (outcome.status === 'failed' && (step['on-error'] ?? 'fail') === 'fail') {
+          runFailed = true
+        }
+      }
+
+      // Foreach execution (extracted from the old inline branch; fan-out
+      // semaphore, fail-fast and summary semantics unchanged).
+      const runForeachStep = async (step: ForeachStepDef, outcome: StepOutcome): Promise<void> => {
+        const over = step.foreach.over.replace(/^\{\{/, '').replace(/\}\}$/, '')
+        const resolved = resolveOverArray(over, scope)
+        if (!resolved.ok) {
+          outcome.status = 'failed'
+          outcome.error = `foreach.over unusable: ${resolved.reason}`
+          return
+        }
+
+        const concurrency = step.foreach['max-concurrency'] ?? DEFAULT_MAX_CONCURRENCY
+        const childTemplate = step.foreach.step
+        let running = 0
+        const waiters: Array<() => void> = []
+        const acquire = async (): Promise<void> => {
+          if (running < concurrency) {
+            running += 1
+            return
+          }
+          await new Promise<void>((release) => waiters.push(release))
+          running += 1
+        }
+        const release = (): void => {
+          running -= 1
+          waiters.shift()?.()
+        }
+        let stopDispatching = false
+        const childOutcomes: StepOutcome[] = []
+        await Promise.all(resolved.items.map(async (item, index) => {
+          if (stopDispatching) return
+          await acquire()
+          if (stopDispatching) {
+            release()
+            return
+          }
+          try {
+            const childId = `${step.id}#${index}`
+            const childOutcome: StepOutcome = { id: childId, status: 'completed', attempts: 0 }
+            childOutcomes[index] = childOutcome
+            steps[childId] = childOutcome
+            scope.steps[childId] = { get output() { return childOutcome.output }, get 'action-output'() { return childOutcome.actionOutput } }
+            runOptions.observers?.stepStarted?.(childId)
+            const childPrior = runOptions.prior?.[childId]
+            if (childPrior !== undefined && childPrior.status === 'completed' && (childTemplate.cache ?? 'on-failure') !== 'never') {
+              Object.assign(childOutcome, childPrior, { replayed: true })
+            } else {
+              await runStep({ ...childTemplate, id: childId } as StepDef, { inputs: scope.inputs, steps: scope.steps, item }, childOutcome, runOptions)
+            }
+            runOptions.observers?.stepSettled?.(childOutcome)
+            if (childOutcome.status === 'failed' && (childTemplate['on-error'] ?? 'fail') === 'fail') {
+              stopDispatching = true
+            }
+          } finally {
+            release()
+          }
+        }))
+
+        const settled = childOutcomes.filter((o) => o !== undefined)
+        const failed = settled.filter((o) => o.status === 'failed').length
+        const summary = {
+          total: resolved.items.length,
+          completed: settled.length - failed,
+          failed,
+          notDispatched: resolved.items.length - settled.length,
+          items: settled.map((o) => ({
+            index: Number(o.id.split('#')[1]),
+            status: o.status,
+            ...(o.replayed === true ? { replayed: true } : {}),
+            ...(o.output !== undefined ? { output: o.output.slice(0, 2000) } : {}),
+            ...(o.error !== undefined ? { error: o.error } : {}),
+          })),
+        }
+        outcome.status = settled.length > 0 && failed === settled.length ? 'failed' : 'completed'
+        if (outcome.status === 'failed' && stopDispatching) {
+          outcome.error = `fail-fast fan-out stopped after ${settled.length}/${resolved.items.length} items`
+        }
+        outcome.output = JSON.stringify(summary)
+        outcome.structured = summary
+      }
+
+      const launch = (id: string): void => {
+        const p = runOne(id).catch((error) => {
+          // A throw here is an engine bug (runStep maps failures to states).
+          const outcome = steps[id]
+          if (outcome !== undefined && outcome.status !== 'completed' && outcome.status !== 'skipped') {
+            outcome.status = 'failed'
+            outcome.error = error instanceof Error ? error.message : String(error)
+          }
+          runFailed = true
+        }).finally(() => {
+          inFlight.delete(id)
+        })
+        inFlight.set(id, p)
+      }
+
+      // Worker loop: fill the concurrency window from the topo queue.
+      while (true) {
+        while (inFlight.size < maxConcurrency && cursor < orderedIds.length && !stopDispatching) {
+          const id = orderedIds[cursor]!
+          const step = byId.get(id)!
+          // A dep must have reached a TERMINAL state before this step may
+          // dispatch: running/pending deps block the cursor (the completion
+          // event re-wakes this loop). A failed dep under on-error:continue
+          // is terminal — the downstream step dispatches and fails loudly
+          // at render time if it references the missing output.
+          const unmet = (step.needs ?? []).some((dep) => {
+            const depOutcome = steps[dep]
+            // failed deps under on-error:continue ARE terminal — the
+            // downstream step dispatches and fails loudly at render time.
+            return depOutcome === undefined || (depOutcome.status !== 'completed' && depOutcome.status !== 'skipped' && depOutcome.status !== 'failed')
+          })
+          if (unmet) break
+          cursor += 1
+          launch(id)
+        }
+        if (inFlight.size === 0) break
+        if (runFailed && stopDispatching) break
+        await Promise.race([...inFlight.values()])
+      }
+
+      // Drain whatever is still in flight after a fail-fast stop.
+      while (inFlight.size > 0) {
+        await Promise.race([...inFlight.values()])
+      }
+
+      if (runFailed) {
+        return { runId, status: 'failed', steps }
       }
 
       // Terminal status rides the TOP-LEVEL steps only. Foreach child
       // checkpoints (<id>#<index>) that failed are already summarized inside
       // their foreach step's structured output — they must not poison the run.
       const walked = orderedIds.every((sid) => {
-        const s = steps[sid]
-        return s !== undefined && (s.status === 'completed' || s.status === 'skipped')
+        const st = steps[sid]
+        return st !== undefined && (st.status === 'completed' || st.status === 'skipped')
       })
       return { runId, status: walked ? 'completed' : 'failed', steps }
     },

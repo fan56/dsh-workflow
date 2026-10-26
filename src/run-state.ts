@@ -7,7 +7,7 @@
  * @module @aiwayds/dsh-workflow/run-state
  */
 
-export type WidgetStepStatus = 'running' | 'completed' | 'failed' | 'skipped'
+export type WidgetStepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
 
 export interface WidgetStepState {
   status: WidgetStepStatus
