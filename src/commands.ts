@@ -197,7 +197,9 @@ export function registerWorkflowCommand(host: CommandHost): RegisteredWorkflowCo
     const projector = createRunProjector(agent.session as unknown as Parameters<typeof createRunProjector>[0], { runId })
     store.begin(workflow, yamlText, inputs)
     projector.runStarted(workflow.name)
-    widgetRunStarted(runId, workflow.name)
+    // Full step list in definition order — pending steps render in the
+    // widget panel alongside active ones.
+    widgetRunStarted(runId, workflow.name, workflow.steps.map((step) => step.id))
     resetWidgetFocus()
 
     const abort = new AbortController()

@@ -230,16 +230,16 @@ export function renderMini(width: number, now = Date.now()): string[] {
   if (start + budget < rows.length) body.push(`  … ${rows.length - start - budget} more`)
   body.push(hotkeys)
 
-  return frame(body, width, titleRight)
+  return frame(body, width)
 }
 
-function frame(body: string[], width: number, titleRight: string): string[] {
+function frame(body: string[], width: number): string[] {
   const inner = Math.max(width - 2, 20)
-  // Title sides clip to fit so the top frame never exceeds the width
-  // (a 180-visible-width CJK name would otherwise blow the border out).
-  const titleLeft = clip(body[0] ?? '', Math.max(8, inner - visibleWidth(titleRight) - 8))
-  const fill = Math.max(1, inner - visibleWidth(titleLeft) - visibleWidth(titleRight) - 4)
-  const framed: string[] = [`╭─ ${titleLeft} ${'─'.repeat(fill)} ${titleRight} ─╮`]
+  // body[0] is the full title row (left identity + right live count, joined
+  // by renderMini) — visible-width clip to the inner width (CJK counts
+  // double), then pad, so the row is exactly the inner width.
+  const titleRow = padVisible(clip(body[0] ?? '', inner), inner)
+  const framed: string[] = [`╭─ ${titleRow} ─╮`]
   for (const line of body.slice(1)) {
     framed.push(`│ ${padVisible(clipLeft(line, hScroll, inner - 2), inner - 2)} │`)
   }

@@ -28,7 +28,7 @@ test('a running run renders a boxed panel: title, centered running step, tokens,
   const lines = renderMini(200)
   // Boxed: top + content rows (title + earlier + windowed steps + more + hotkey) + bottom.
   assert.ok(lines.length >= 8 && lines.length <= 11, `panel line count ${lines.length}`)
-  assert.ok(lines[0].startsWith('╭─'), 'top frame')
+  assert.ok(lines[0].startsWith('╭─ '), 'top frame')
   assert.match(lines.join('\n'), /workflow: fan/)
   const bodyRows = lines.slice(1, 8)
   // The window centers on the RUNNING step: earlier marker + 2 done above,
