@@ -30,6 +30,7 @@ import { createRunProjector } from './projection.ts'
 import { defaultAgentsDir } from './roster.ts'
 import { flushWidgetFile } from './tui-widget.ts'
 import { reconcileInterruptedSteps } from './repair.ts'
+import { resetWidgetFocus } from './tui-widget.ts'
 import { widgetRunSettled, widgetRunStarted, widgetStepUpdate } from './run-state.ts'
 
 /** Structural view of the jobs registry (the shape executeRun uses). */
@@ -196,6 +197,8 @@ export function registerWorkflowCommand(host: CommandHost): RegisteredWorkflowCo
     const projector = createRunProjector(agent.session as unknown as Parameters<typeof createRunProjector>[0], { runId })
     store.begin(workflow, yamlText, inputs)
     projector.runStarted(workflow.name)
+    widgetRunStarted(runId, workflow.name)
+    resetWidgetFocus()
 
     const abort = new AbortController()
     const active: ActiveRun = { abort, name: workflow.name }
