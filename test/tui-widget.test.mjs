@@ -33,7 +33,6 @@ test('a running run renders the chain: header summary, centered running stage, h
   assert.match(joined, /✓step-0 ──▶ ✓step-1/)
   assert.match(joined, /▶step-4 ──▶ ·step-5/)
   // 正在执行的 stage 居中 + 四件套 └─ 竖排
-  assert.match(joined, /▶ step-4/)
   assert.match(joined, /└─ 3轮/)
   assert.match(joined, /└─ 14调/)
   assert.match(joined, /└─ 500t/)

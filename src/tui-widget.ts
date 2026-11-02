@@ -232,16 +232,16 @@ export function renderMini(width: number, now = Date.now()): string[] {
   const lines: string[] = []
   lines.push(joinRow(`${run.name}  ${runIcon} ${run.status === 'running' ? `${live} ${t.live}` : `${doneSteps}/${totalSteps}`}`, `${fmtTokens(tokens)} tok`, width))
   for (const row of chainRows) lines.push(joinRow(row, '', width))
-  // 正在执行的 stage 居中：名称行居中 + 四件套 └─ 竖排
+  // 正在执行的 stage：四件套 └─ 竖排（链行里 ▶ 已标执行位，名字不重复画），
+  // 整块水平居中。
   if (focusId !== undefined) {
-    const nameRow = `${glyphOf(focusId)} ${stepName(focusId)}`
-    const pad = Math.max(0, Math.floor((width - visibleWidth(nameRow)) / 2))
-    const blockRows = 1 + statParts.length
+    const blockRows = statParts.length
     const used = chainRows.length
     const leftover = Math.max(0, PANEL_ROWS - used - blockRows)
     for (let i = 0; i < Math.floor(leftover / 2); i++) lines.push(joinRow('', '', width))
-    lines.push(joinRow(' '.repeat(pad) + nameRow, '', width))
-    for (const part of statParts) lines.push(joinRow(`└─ ${part}`, '', width))
+    const blockWidth = Math.max(...statParts.map((part) => visibleWidth(`└─ ${part}`)), 1)
+    const blockPad = Math.max(0, Math.floor((width - blockWidth) / 2))
+    for (const part of statParts) lines.push(joinRow(' '.repeat(blockPad) + `└─ ${part}`, '', width))
   }
   const footer = runs.length > 1
     ? `Alt+W ${overlayLocale === 'zh' ? '切换' : 'cycle'} (${runs.findIndex((r) => r.runId === run.runId) + 1}/${runs.length}) · ←→ pan · Ctrl+K`
