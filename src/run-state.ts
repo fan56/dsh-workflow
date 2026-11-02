@@ -25,6 +25,8 @@ export interface WidgetRunState {
   settledAt?: number
   /** The workflow's full step list in definition order — pending steps render too. */
   stepIds: string[]
+  /** needs edges by step id (declaration order) — the widget draws the dependency tree from these. */
+  needs?: Record<string, readonly string[]>
   steps: Map<string, WidgetStepState>
 }
 
@@ -32,8 +34,13 @@ const active = new Map<string, WidgetRunState>()
 /** How long a settled run stays visible to the widget (ms). */
 const SETTLED_GRACE_MS = 60_000
 
-export function widgetRunStarted(runId: string, name: string, stepIds: string[] = []): void {
-  active.set(runId, { runId, name, status: 'running', startedAt: Date.now(), stepIds, steps: new Map() })
+export function widgetRunStarted(
+  runId: string,
+  name: string,
+  stepIds: string[] = [],
+  needs?: Record<string, readonly string[]>,
+): void {
+  active.set(runId, { runId, name, status: 'running', startedAt: Date.now(), stepIds, needs, steps: new Map() })
 }
 
 export function widgetStepUpdate(

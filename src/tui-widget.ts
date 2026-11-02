@@ -198,9 +198,26 @@ export function renderMini(width: number, now = Date.now()): string[] {
   const headerRight = `${runIcon} ${doneSteps}/${totalSteps} ${t.steps ?? 'steps'} · ${fmtTokens(tokens)} tok`
   const header = joinRow(headerLeft, headerRight, width)
 
-  // ---- Tree rows ----
+  // ---- Tree rows（needs 依赖图 → 真·树）----
+  // 每步认领给声明序里的第一个 needs 父（diamond 只画一次）；
+  // 无父（或父不在图内）= 根，挂在 depth 0。foreach 子步(id#N)仍跟父展开。
+  const needs = run.needs ?? {}
+  const kidsOf = new Map<string, string[]>()
+  const roots: string[] = []
+  for (const id of run.stepIds) {
+    if (id.includes('#')) continue
+    const deps = (needs[id] ?? []).filter((dep) => run.stepIds.includes(dep) && dep !== id)
+    const parent = deps.find((dep) => !deps.includes(id) && run.stepIds.includes(dep))
+    if (parent === undefined) {
+      roots.push(id)
+      continue
+    }
+    const list = kidsOf.get(parent) ?? []
+    list.push(id)
+    kidsOf.set(parent, list)
+  }
   const treeRows: TreeRow[] = []
-  const pushStep = (id: string, depth: number, isLast: boolean, forceRunningIcon: boolean): void => {
+  const pushStep = (id: string, depth: number, isLast: boolean): void => {
     const step = run.steps.get(id)
     const status = step?.status ?? 'pending'
     // No icon here: the assembly layer prepends the status marker (spinner
@@ -209,44 +226,23 @@ export function renderMini(width: number, now = Date.now()): string[] {
     const name = id.includes('#') ? id.split('#')[1]! : id
     let row = `${branch}${name}`
     if (step?.children !== undefined && step.children > 0) row += `  ⬢ ${step.children}`
-    treeRows.push({ text: row, depth, running: status === 'running' || forceRunningIcon, status, stepId: id })
-    // foreach 子行:running/completed/pending 全列(总数小),超出窗口由滑动处理
-    if (step?.children !== undefined && step.children > 0 && depth === 0) {
-      // 子行在父正下方(定义序已按 #index 排列)
+    treeRows.push({ text: row, depth, running: status === 'running', status, stepId: id })
+  }
+  const emit = (id: string, depth: number, isLast: boolean): void => {
+    pushStep(id, depth, isLast)
+    // needs 子步（认领给本父的）
+    const kids = kidsOf.get(id) ?? []
+    kids.forEach((kid, j) => emit(kid, depth + 1, j === kids.length - 1))
+    // foreach 子行跟父
+    const step = run.steps.get(id)
+    if (step?.children !== undefined && step.children > 0) {
       for (const kidId of run.steps.keys()) {
         if (!kidId.startsWith(`${id}#`)) continue
-        pushStep(kidId, depth + 1, false, false)
+        pushStep(kidId, depth + 1, false)
       }
     }
   }
-
-  // 深度优先展开(定义序=拓扑近似);foreach 子行跟父
-  const seen = new Set<string>()
-  const walk = (ids: string[], depth: number): void => {
-    ids.forEach((id, i) => {
-      if (seen.has(id)) return
-      seen.add(id)
-      if (id.includes('#')) return // 子步在父展开时列
-      const step = run.steps.get(id)
-      const isLastTop = i === ids.length - 1
-      pushStep(id, depth, isLastTop, false)
-      if (isForeachShape(id)) {
-        const kids = [...run.steps.keys()].filter((k) => k.startsWith(`${id}#`)).sort((a, b) => Number(a.split('#')[1]) - Number(b.split('#')[1]))
-        kids.forEach((kid, j) => {
-          if (seen.has(kid)) return
-          seen.add(kid)
-          pushStep(kid, depth + 1, j === kids.length - 1, false)
-        })
-      }
-      void step
-      void isLastTop
-    })
-  }
-  const isForeachShape = (id: string): boolean => id.includes('#')
-  // 占位避免未用告警
-  void isForeachShape
-
-  walk(topIdsFromRun(run), 0)
+  roots.forEach((id, i) => emit(id, 0, i === roots.length - 1))
 
   // ---- 窗口:RUNNING 行居中 ----
   const runningRowIdx = treeRows.findIndex((r) => r.running)
@@ -364,7 +360,7 @@ const WIDGET_GRACE_MS = 60_000
  */
 export function cycleSignalFile(): string {
   const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-  return join(home, 'tui-widgets', 'cycle.signal')
+  return join(home, 'tui-widgets', `dsh-workflow.${process.pid}.cycle.signal`)
 }
 
 let pollTimer: ReturnType<typeof setInterval> | undefined
@@ -372,7 +368,7 @@ let pollTimer: ReturnType<typeof setInterval> | undefined
 /** The widget lines file: `$DSH_HOME/tui-widgets/dsh-workflow.lines`. */
 export function widgetFile(): string {
   const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-  return join(home, 'tui-widgets', 'dsh-workflow.lines')
+  return join(home, 'tui-widgets', `dsh-workflow.${process.pid}.lines`)
 }
 
 let clearTimer: ReturnType<typeof setTimeout> | undefined

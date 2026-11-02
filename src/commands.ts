@@ -199,7 +199,12 @@ export function registerWorkflowCommand(host: CommandHost): RegisteredWorkflowCo
     projector.runStarted(workflow.name)
     // Full step list in definition order — pending steps render in the
     // widget panel alongside active ones.
-    widgetRunStarted(runId, workflow.name, workflow.steps.map((step) => step.id))
+    widgetRunStarted(
+      runId,
+      workflow.name,
+      workflow.steps.map((step) => step.id),
+      Object.fromEntries(workflow.steps.map((step) => [step.id, step.needs ?? []])),
+    )
     resetWidgetFocus()
 
     const abort = new AbortController()
