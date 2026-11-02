@@ -198,79 +198,50 @@ export function renderMini(width: number, now = Date.now()): string[] {
   const headerRight = `${runIcon} ${doneSteps}/${totalSteps} ${t.steps ?? 'steps'} · ${fmtTokens(tokens)} tok`
   const header = joinRow(headerLeft, headerRight, width)
 
-  // ---- Tree rows（needs 依赖图 → 真·树）----
-  // 每步认领给声明序里的第一个 needs 父（diamond 只画一次）；
-  // 无父（或父不在图内）= 根，挂在 depth 0。foreach 子步(id#N)仍跟父展开。
-  const needs = run.needs ?? {}
-  const kidsOf = new Map<string, string[]>()
-  const roots: string[] = []
-  for (const id of run.stepIds) {
-    if (id.includes('#')) continue
-    const deps = (needs[id] ?? []).filter((dep) => run.stepIds.includes(dep) && dep !== id)
-    const parent = deps.find((dep) => !deps.includes(id) && run.stepIds.includes(dep))
-    if (parent === undefined) {
-      roots.push(id)
-      continue
-    }
-    const list = kidsOf.get(parent) ?? []
-    list.push(id)
-    kidsOf.set(parent, list)
+  // ---- 链式横排 + 正在执行的 stage 居中 ----
+  // 根步骤一行横排、──▶ 串联；正在执行（或失败）的 stage 居中放大，
+  // 四件套各占一行 └─ 竖排；结束即收起，自动切到下一个。
+  const roots = run.stepIds.filter((id) => !id.includes('#'))
+  const glyphOf = (id: string): string => {
+    const st = run.steps.get(id)?.status ?? 'pending'
+    return st === 'completed' ? '✓' : st === 'running' ? '▶' : st === 'failed' ? '✗' : st === 'skipped' ? '↷' : '·'
   }
-  const treeRows: TreeRow[] = []
-  const pushStep = (id: string, depth: number, isLast: boolean): void => {
-    const step = run.steps.get(id)
-    const status = step?.status ?? 'pending'
-    // No icon here: the assembly layer prepends the status marker (spinner
-    // for running) — one marker per row, never two.
-    const branch = depth === 0 ? '' : (isLast ? '└─ ' : '├─ ')
-    const name = id.includes('#') ? id.split('#')[1]! : id
-    let row = `${branch}${name}`
-    if (step?.children !== undefined && step.children > 0) row += `  ⬢ ${step.children}`
-    const stat = stepStatsSuffix(step, now)
-    if (stat !== '') row += `  ${stat}`
-    treeRows.push({ text: row, depth, running: status === 'running', status, stepId: id })
-  }
-  const emit = (id: string, depth: number, isLast: boolean): void => {
-    pushStep(id, depth, isLast)
-    // needs 子步（认领给本父的）
-    const kids = kidsOf.get(id) ?? []
-    kids.forEach((kid, j) => emit(kid, depth + 1, j === kids.length - 1))
-    // foreach 子行跟父
-    const step = run.steps.get(id)
-    if (step?.children !== undefined && step.children > 0) {
-      for (const kidId of run.steps.keys()) {
-        if (!kidId.startsWith(`${id}#`)) continue
-        pushStep(kidId, depth + 1, false)
-      }
+  const stepName = (id: string): string => (id.includes('#') ? id.split('#')[1]! : id)
+  const chainSegs = roots.map((id) => `${glyphOf(id)}${stepName(id)}`)
+  // 链行按步边界贪心折行（超出宽度就换行续排）
+  const chainRows: string[] = []
+  let cur = ''
+  for (const s of chainSegs) {
+    const piece = cur === '' ? s : `${cur} ──▶ ${s}`
+    if (visibleWidth(piece) > width - 4 && cur !== '') {
+      chainRows.push(cur)
+      cur = s
+    } else {
+      cur = piece
     }
   }
-  roots.forEach((id, i) => emit(id, 0, i === roots.length - 1))
+  if (cur !== '') chainRows.push(cur)
 
-  // ---- 窗口:RUNNING 行居中 ----
-  const runningRowIdx = treeRows.findIndex((r) => r.running)
-  let start = 0
-  if (treeRows.length > PANEL_ROWS - 1) {
-    const center = runningRowIdx >= 0 ? runningRowIdx : 0
-    start = Math.min(Math.max(0, center - Math.floor((PANEL_ROWS - 2) / 2)), treeRows.length - (PANEL_ROWS - 1))
-  }
-  const windowed = treeRows.slice(start, start + PANEL_ROWS - 1)
+  const runningId = roots.find((id) => run.steps.get(id)?.status === 'running')
+  const failedId = roots.find((id) => run.steps.get(id)?.status === 'failed')
+  const focusId = runningId ?? failedId
+  const focusStep = focusId !== undefined ? run.steps.get(focusId) : undefined
+  const statParts = stepStatParts(focusStep, now)
 
   // ---- 组装 7 行 ----
   const lines: string[] = []
   lines.push(joinRow(`${run.name}  ${runIcon} ${run.status === 'running' ? `${live} ${t.live}` : `${doneSteps}/${totalSteps}`}`, `${fmtTokens(tokens)} tok`, width))
-  // earlier/more 标记计入 7 行预算(窗放不下时各占一行)
-  if (start > 0) {
-    lines.push(joinRow(`… ${start} ${overlayLocale === 'zh' ? '更早' : 'earlier'}`, '', width))
-  }
-  for (const row of windowed) {
-    const indent = '  '.repeat(row.depth)
-    const marker = row.running ? '▸ ' : row.status === 'pending' ? '○ ' : (STATUS_ICON[row.status] ?? '') + ' '
-    const branch = row.depth === 0 ? marker : ''
-    lines.push(joinRow(`${indent}${branch}${row.text}`, '', width))
-  }
-  const remaining = treeRows.length - start - windowed.length
-  if (remaining > 0) {
-    lines.push(joinRow(`… ${remaining} ${overlayLocale === 'zh' ? '更多' : 'more'}`, '', width))
+  for (const row of chainRows) lines.push(joinRow(row, '', width))
+  // 正在执行的 stage 居中：名称行居中 + 四件套 └─ 竖排
+  if (focusId !== undefined) {
+    const nameRow = `${glyphOf(focusId)} ${stepName(focusId)}`
+    const pad = Math.max(0, Math.floor((width - visibleWidth(nameRow)) / 2))
+    const blockRows = 1 + statParts.length
+    const used = chainRows.length
+    const leftover = Math.max(0, PANEL_ROWS - used - blockRows)
+    for (let i = 0; i < Math.floor(leftover / 2); i++) lines.push(joinRow('', '', width))
+    lines.push(joinRow(' '.repeat(pad) + nameRow, '', width))
+    for (const part of statParts) lines.push(joinRow(`└─ ${part}`, '', width))
   }
   const footer = runs.length > 1
     ? `Alt+W ${overlayLocale === 'zh' ? '切换' : 'cycle'} (${runs.findIndex((r) => r.runId === run.runId) + 1}/${runs.length}) · ←→ pan · Ctrl+K`
@@ -297,12 +268,12 @@ function fmtCompact(n: number): string {
   return String(n)
 }
 
-/** 每步统计四件套(数据缺就省略):耗时 · 轮数 · 工具调用 · token 小结。 */
-function stepStatsSuffix(
+/** 正在执行的 stage 四件套（每项独占一行 └─）。 */
+function stepStatParts(
   step: { status: string; totalTokens?: number; startedAt?: number; endedAt?: number; rounds?: number; toolCalls?: number } | undefined,
   now: number,
-): string {
-  if (step === undefined) return ''
+): string[] {
+  if (step === undefined) return []
   const parts: string[] = []
   const end = step.endedAt ?? (step.status === 'running' ? now : undefined)
   if (step.startedAt !== undefined && end !== undefined) {
@@ -312,7 +283,7 @@ function stepStatsSuffix(
   if (step.rounds !== undefined) parts.push(`${step.rounds}轮`)
   if (step.toolCalls !== undefined) parts.push(`${step.toolCalls}调`)
   if (step.totalTokens !== undefined) parts.push(`${fmtCompact(step.totalTokens)}t`)
-  return parts.length === 0 ? '' : parts.join(' ')
+  return parts
 }
 
 /** 左文本 + 右对齐右段(可见宽计算,CJK 安全)。 */

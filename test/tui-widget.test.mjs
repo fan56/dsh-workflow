@@ -17,25 +17,26 @@ test('no active runs renders nothing (the dock hides the widget)', () => {
   assert.deepEqual(renderMini(80), [])
 })
 
-test('a running run renders the timeline: header summary, centered running step, hotkeys', () => {
+test('a running run renders the chain: header summary, centered running stage, hotkeys', () => {
   resetWidgetRuns()
   const stepIds = Array.from({ length: 10 }, (_, i) => `step-${i}`)
-  widgetRunStarted('r1', 'fan', stepIds)
+  widgetRunStarted('r1', 'fan', stepIds, { 'step-1': ['step-0'], 'step-4': ['step-3'] })
   for (let i = 0; i < 4; i++) widgetStepUpdate('r1', `step-${i}`, 'completed', 1000)
-  widgetStepUpdate('r1', 'step-4', 'running', 500)
+  widgetStepUpdate('r1', 'step-4', 'running', 500, { rounds: 3, toolCalls: 14 })
   for (let i = 5; i < 10; i++) widgetStepUpdate('r1', `step-${i}`, 'pending')
   const lines = renderMini(200)
-  // 7 content rows: header + 5-step window + hotkey footer.
-  assert.ok(lines.length >= 8 && lines.length <= 11, `line count ${lines.length}`)
   const joined = lines.join('\n')
   assert.match(joined, /fan/)
   assert.match(joined, /1 live/)
   assert.match(joined, /4\.5k tok/)
-  // The RUNNING step is centered: window shows step-2..step-6.
-  assert.match(joined, /▸ step-4/)
-  assert.match(joined, /✅ step-2/)
-  assert.match(joined, /○ step-5/)
-  assert.match(joined, /… 2 more/)
+  // 链式横排:全部 stage 在一行,──▶ 串联,状态字标前缀
+  assert.match(joined, /✓step-0 ──▶ ✓step-1/)
+  assert.match(joined, /▶step-4 ──▶ ·step-5/)
+  // 正在执行的 stage 居中 + 四件套 └─ 竖排
+  assert.match(joined, /▶ step-4/)
+  assert.match(joined, /└─ 3轮/)
+  assert.match(joined, /└─ 14调/)
+  assert.match(joined, /└─ 500t/)
   assert.match(joined, /Ctrl\+K tree/)
 })
 test('a settled run shows its terminal state, then ages out after the grace window', () => {
