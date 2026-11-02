@@ -21,8 +21,11 @@ dsh-workflow 把可重复的工作(发版波/迁移波/巡检/情报搜集)固�
 
 ## 增(创建)
 
-用户说"建一个 workflow 做 X"时:**在工作区写 `<name>.workflow.yaml`**
-(kebab-case,名=文件名),然后告诉用户 `/workflow run <文件>`。
+用户说"建一个 workflow 做 X"时:**写到个人库 `$DSH_HOME/workflows/`**
+(缺省 `~/.dsh/workflows/`;目录不存在就 `mkdir -p`;文件名 kebab-case,
+名=文件名),写完跑 `/wf list` 确认新条目出现,再告诉用户
+`/workflow run <文件>`。仅项目专属的 workflow 才放启动目录(cwd)——
+个人通用的进个人库,`/wf` 在任何目录启动都能看到它。
 
 最小骨架:
 
