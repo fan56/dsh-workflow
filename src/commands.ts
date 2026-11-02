@@ -253,7 +253,7 @@ export function registerWorkflowCommand(host: CommandHost): RegisteredWorkflowCo
         },
         stepSettled: (step) => {
           store.stepSettled(step.id, step)
-          widgetStepUpdate(runId, step.id, step.status, step.usage?.totalTokens)
+          widgetStepUpdate(runId, step.id, step.status, step.usage?.totalTokens, { rounds: step.usage?.rounds, toolCalls: step.usage?.toolCalls })
           flushWidgetFile()
           jobLine?.(`${step.id}: ${step.status}${step.usage !== undefined ? ` · ${step.usage.totalTokens} tok` : ''}`)
         },

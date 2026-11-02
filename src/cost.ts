@@ -20,6 +20,10 @@ export interface UsageSummary {
   totalTokens: number
   reasoningTokens?: number
   cacheReadTokens?: number
+  /** Assistant turns in the child log — one per agent-loop round. */
+  rounds?: number
+  /** ToolCall content blocks across the child log. */
+  toolCalls?: number
   provider?: string
   model?: string
 }
@@ -94,12 +98,22 @@ async function tryFoldOnce(persistence: PersistenceLike, childId: SessionId): Pr
     let reasoningTokens: number | undefined
     let cacheReadTokens: number | undefined
     let route: { provider?: string; model?: string } = {}
+    let rounds = 0
+    let toolCalls = 0
     for (const event of events) {
       if (event.type === 'request/header') {
         route = pickRoute(event.data)
         continue
       }
       if (event.type !== 'assistant/message') continue
+      rounds += 1
+      const data = event.data as { message?: { content?: unknown } } | undefined
+      const content = data?.message?.content
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'toolCall') toolCalls += 1
+        }
+      }
       const usage = (event.data as { usage?: Record<string, unknown> } | undefined)?.usage
       if (typeof usage !== 'object' || usage === null) continue
       const u = usage as Record<string, unknown>
@@ -120,6 +134,8 @@ async function tryFoldOnce(persistence: PersistenceLike, childId: SessionId): Pr
       totalTokens: inputTokens + outputTokens,
       ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
       ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+      ...(rounds > 0 ? { rounds } : {}),
+      ...(toolCalls > 0 ? { toolCalls } : {}),
       ...route,
     }
   } catch {

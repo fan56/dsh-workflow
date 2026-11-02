@@ -32,9 +32,18 @@ test('usage accumulates across turns; route comes from the last request/header',
     totalTokens: 158,
     reasoningTokens: 5,
     cacheReadTokens: 10,
+    rounds: 2,
     provider: 'prov-b',
     model: 'm-2',
   })
+})
+
+test('toolCall content blocks count as tool calls; rounds counts assistant turns', async () => {
+  const usage = await foldChildUsage(fakePersistence([
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'hi' }, { type: 'toolCall', callId: 'a' }, { type: 'toolCall', callId: 'b' }] }, usage: { inputTokens: 5, outputTokens: 2 } } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'toolCall', callId: 'c' }] }, usage: { inputTokens: 3, outputTokens: 1 } } },
+  ]), 'c')
+  assert.deepEqual(usage, { inputTokens: 8, outputTokens: 3, totalTokens: 11, rounds: 2, toolCalls: 3 })
 })
 
 test('a log with no usage and no route returns undefined', async () => {

@@ -122,7 +122,7 @@ test('usage folds from the child session and lands on the outcome; frontmatter r
     })
     const dispatch = createDispatch(host, { parent: PARENT, runId: 'r9', agentsDir: dir })
     const outcome = await dispatch({ agentName: 'worker', prompt: 'p', label: 's1' })
-    assert.deepEqual(outcome.usage, { inputTokens: 11, outputTokens: 7, totalTokens: 18, provider: 'prov', model: 'm' })
+    assert.deepEqual(outcome.usage, { inputTokens: 11, outputTokens: 7, totalTokens: 18, rounds: 1, provider: 'prov', model: 'm' })
     // The frontmatter `provider/model` route is split, never passed whole.
     const spec = host.activations.at(-1)
     assert.deepEqual(spec.request.agentOptions, { provider: 'prov-x', model: 'm-9', reasoningEffort: 'low' })

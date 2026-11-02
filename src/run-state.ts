@@ -13,6 +13,12 @@ export interface WidgetStepState {
   status: WidgetStepStatus
   totalTokens?: number
   startedAt?: number
+  /** Set when the step reaches a terminal status — elapsed = endedAt - startedAt. */
+  endedAt?: number
+  /** Agent-loop rounds folded from the child log. */
+  rounds?: number
+  /** ToolCall blocks folded from the child log. */
+  toolCalls?: number
   /** Child subagents dispatched by this step (foreach fan-out counts each). */
   children?: number
 }
@@ -48,15 +54,28 @@ export function widgetStepUpdate(
   stepId: string,
   status: WidgetStepStatus,
   totalTokens?: number,
+  stats?: { rounds?: number; toolCalls?: number },
 ): void {
   const run = active.get(runId)
   if (run === undefined) return
   const existing = run.steps.get(stepId)
+  const terminal = status === 'completed' || status === 'failed' || status === 'skipped'
   run.steps.set(stepId, {
     status,
     ...(totalTokens !== undefined ? { totalTokens } : {}),
     ...(existing?.totalTokens !== undefined && totalTokens === undefined ? { totalTokens: existing.totalTokens } : {}),
     startedAt: existing?.startedAt ?? (status === 'running' ? Date.now() : undefined),
+    ...(existing?.endedAt !== undefined ? { endedAt: existing.endedAt } : terminal ? { endedAt: Date.now() } : {}),
+    ...(stats?.rounds !== undefined
+      ? { rounds: stats.rounds }
+      : existing?.rounds !== undefined
+        ? { rounds: existing.rounds }
+        : {}),
+    ...(stats?.toolCalls !== undefined
+      ? { toolCalls: stats.toolCalls }
+      : existing?.toolCalls !== undefined
+        ? { toolCalls: existing.toolCalls }
+        : {}),
     ...(existing?.children !== undefined ? { children: existing.children } : {}),
   })
 }

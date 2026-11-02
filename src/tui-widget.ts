@@ -226,6 +226,8 @@ export function renderMini(width: number, now = Date.now()): string[] {
     const name = id.includes('#') ? id.split('#')[1]! : id
     let row = `${branch}${name}`
     if (step?.children !== undefined && step.children > 0) row += `  ⬢ ${step.children}`
+    const stat = stepStatsSuffix(step, now)
+    if (stat !== '') row += `  ${stat}`
     treeRows.push({ text: row, depth, running: status === 'running', status, stepId: id })
   }
   const emit = (id: string, depth: number, isLast: boolean): void => {
@@ -283,6 +285,34 @@ function topIdsFromRun(run: WidgetRunState): string[] {
 
 function isForeachShape(id: string): boolean {
   return id.includes('#')
+}
+
+/** 紧凑数字:1_500_000→`1.5m`,20_965→`20k`,999→`999`。 */
+function fmtCompact(n: number): string {
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000
+    return `${Number.isInteger(m) ? String(m) : m.toFixed(1).replace(/\.0$/, '')}m`
+  }
+  if (n >= 1_000) return `${Math.floor(n / 1_000)}k`
+  return String(n)
+}
+
+/** 每步统计四件套(数据缺就省略):耗时 · 轮数 · 工具调用 · token 小结。 */
+function stepStatsSuffix(
+  step: { status: string; totalTokens?: number; startedAt?: number; endedAt?: number; rounds?: number; toolCalls?: number } | undefined,
+  now: number,
+): string {
+  if (step === undefined) return ''
+  const parts: string[] = []
+  const end = step.endedAt ?? (step.status === 'running' ? now : undefined)
+  if (step.startedAt !== undefined && end !== undefined) {
+    const secs = Math.max(1, Math.round((end - step.startedAt) / 1000))
+    parts.push(secs >= 3600 ? `${Math.floor(secs / 3600)}h${String(Math.floor((secs % 3600) / 60)).padStart(2, '0')}m` : secs >= 60 ? `${Math.floor(secs / 60)}m${String(secs % 60).padStart(2, '0')}s` : `${secs}s`)
+  }
+  if (step.rounds !== undefined) parts.push(`${step.rounds}轮`)
+  if (step.toolCalls !== undefined) parts.push(`${step.toolCalls}调`)
+  if (step.totalTokens !== undefined) parts.push(`${fmtCompact(step.totalTokens)}t`)
+  return parts.length === 0 ? '' : parts.join(' ')
 }
 
 /** 左文本 + 右对齐右段(可见宽计算,CJK 安全)。 */
