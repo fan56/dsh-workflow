@@ -108,7 +108,7 @@ jobs:
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           npm version "${TAG_VERSION}" --no-git-tag-version --allow-same-version
-          echo "publishing @aiwayds/dsh-ptc-subagent@${TAG_VERSION} (tag ${GITHUB_REF_NAME})"
+          echo "publishing @aiwayds/dsh-workflow@${TAG_VERSION} (tag ${GITHUB_REF_NAME})"
       - name: Publish
         # A re-pushed tag (or a publish landing mid-run) can race an
         # already-published version. npm versions are immutable, so if the
@@ -128,8 +128,8 @@ jobs:
             *) NPM_TAG="latest" ;;
           esac
           echo "npm dist-tag: ${NPM_TAG}"
-          if npm view "@aiwayds/dsh-ptc-subagent@${TAG_VERSION}" version >/dev/null 2>&1; then
-            echo "::warning::@aiwayds/dsh-ptc-subagent@${TAG_VERSION} is already on npm — skipping publish"
+          if npm view "@aiwayds/dsh-workflow@${TAG_VERSION}" version >/dev/null 2>&1; then
+            echo "::warning::@aiwayds/dsh-workflow@${TAG_VERSION} is already on npm — skipping publish"
             exit 0
           fi
           set +e
@@ -138,7 +138,7 @@ jobs:
           set -e
           printf '%s\n' "$PUB_OUT"
           if [ "${PUB_RC}" -ne 0 ] && printf '%s' "$PUB_OUT" | grep -q "cannot publish over the previously published versions"; then
-            echo "::warning::@aiwayds/dsh-ptc-subagent@${TAG_VERSION} was published concurrently (or landed mid-publish) — treating as success"
+            echo "::warning::@aiwayds/dsh-workflow@${TAG_VERSION} was published concurrently (or landed mid-publish) — treating as success"
             exit 0
           fi
           exit "${PUB_RC}"
