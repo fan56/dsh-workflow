@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Dev closure re-pinned to `0.2.2-rc.1`**: devDependencies `dsh-agent` / `dsh-session` / `dsh-subagent` move `0.2.1-rc.5` → `0.2.2-rc.1`; `@deepseek-ai/cordis` follows the closure `4.0.5` → `4.1.0` (the 0.2.2-rc.1 packages hard-peer `cordis ~4.1.0`; resolved by the "dev pin follows the host closure" precedent). A repo `.npmrc` with `legacy-peer-deps=true` joins per the same precedent, so plain `npm install` no longer auto-installs the closure peers (e.g. `dsh-agent`'s `dsh-llm` peer) from the stable tower over the linked closure. Peer floors stay `>= 4.0.4` (cordis) — untouched; the host preflight satisfies ranges with `includePrerelease`, so the floors already match the new rc. The CI host-resolution step already resolves the newest of the `latest`/`next` dist-tags with the prerelease-aware comparator, and publish.yml keeps its existing newest-of current-check — no workflow change this wave. Verified against a scratch 0.2.2-rc.1 host closure (the CI install shape): tsc check clean, 64 pass / 0 fail, boot smoke PASS on the real host.
+
 ## 0.1.0 - 2026-11-04
 
 Initial release: the declarative workflow plugin for dsh — recurring daily pipelines (release waves, migration waves, inspections) as named, reviewable, resumable YAML workflows running on the host's own subagent/jobs/approval primitives, zero core patches.
