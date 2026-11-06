@@ -1,6 +1,6 @@
 {
   "name": "@aiwayds/dsh-workflow",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "dsh plugin: declarative YAML workflows — durable daily pipelines (release waves, migration waves, inspections) over the host's own subagent/jobs primitives",
   "keywords": [
     "dsh",

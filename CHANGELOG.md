@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## 0.2.0 - 2026-11-06
 
 ### Changed
 - **Dev closure re-pinned to `0.2.2-rc.1`**: devDependencies `dsh-agent` / `dsh-session` / `dsh-subagent` move `0.2.1-rc.5` → `0.2.2-rc.1`; `@deepseek-ai/cordis` follows the closure `4.0.5` → `4.1.0` (the 0.2.2-rc.1 packages hard-peer `cordis ~4.1.0`; resolved by the "dev pin follows the host closure" precedent). A repo `.npmrc` with `legacy-peer-deps=true` joins per the same precedent, so plain `npm install` no longer auto-installs the closure peers (e.g. `dsh-agent`'s `dsh-llm` peer) from the stable tower over the linked closure. Peer floors stay `>= 4.0.4` (cordis) — untouched; the host preflight satisfies ranges with `includePrerelease`, so the floors already match the new rc. The CI host-resolution step already resolves the newest of the `latest`/`next` dist-tags with the prerelease-aware comparator; publish.yml's leftover `sort -V` pick is now switched to the same compare (see below). Verified against a scratch 0.2.2-rc.1 host closure (the CI install shape): tsc check clean, 64 pass / 0 fail, boot smoke PASS on the real host.
