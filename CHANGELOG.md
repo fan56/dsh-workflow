@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 - 2026-11-09
+
+### Fixed
+- Mark the `@deepseek-ai/dsh-agent`, `@deepseek-ai/dsh-session` and `@deepseek-ai/dsh-subagent` peers optional in `peerDependenciesMeta` per the optional-peer contract.
+
 ## 0.2.0 - 2026-11-06
 
 ### Changed

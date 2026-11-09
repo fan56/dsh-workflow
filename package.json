@@ -1,6 +1,6 @@
 {
   "name": "@aiwayds/dsh-workflow",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "dsh plugin: declarative YAML workflows — durable daily pipelines (release waves, migration waves, inspections) over the host's own subagent/jobs primitives",
   "keywords": [
     "dsh",
@@ -45,6 +45,15 @@
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-agent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-subagent": {
       "optional": true
     }
   },
