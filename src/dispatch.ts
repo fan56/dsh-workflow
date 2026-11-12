@@ -56,7 +56,11 @@ export interface DispatchHost extends CompositionHost {
       agentOptions?: { model?: string; reasoningEffort?: string }
       outputSchema?: Record<string, unknown>
       maxDepth?: number
-      signal?: AbortSignal
+      /** Required on the 0.2.2-rc.2 line (dsh-subagent types.d.ts:37 —
+       * `readonly signal: AbortSignal` on the flattened
+       * `SubagentActivationSpec`); declared required so a future host reshape
+       * of `signal` surfaces in tsc instead of vanishing behind the cast. */
+      signal: AbortSignal
       delivery: 'parent' | 'caller'
     }): Promise<{
       childId: SessionId
