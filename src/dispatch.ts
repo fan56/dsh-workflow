@@ -38,17 +38,24 @@ export interface DispatchHost extends CompositionHost {
     view?: { restrictableNames?: ReadonlySet<string> }
   }
   subagents: CompositionHost['subagents'] & {
+    /**
+     * 0.2.2-rc.2 flattened `SubagentActivationSpec`: the start-request fields
+     * (`prompt`/`parent`/`agentOptions`/`outputSchema`/`maxDepth`) ride the
+     * spec itself. Pre-rc.2 lines read the same fields from a nested
+     * `request` block — {@linkcode rc2ChildSurface} picks the branch, and the
+     * legacy object is cast at the call site (the declared shape stays the
+     * current line's, so a future host reshape is visible to tsc again
+     * instead of hiding behind a self-declared nested block).
+     */
     startActivation(spec: {
       provider: string
       label: string
       childId?: SessionId
-      request: {
-        prompt: Array<{ type: string; text: string }>
-        parent: Agent
-        agentOptions?: { model?: string; reasoningEffort?: string }
-        outputSchema?: Record<string, unknown>
-        maxDepth?: number
-      }
+      prompt: Array<{ type: string; text: string }>
+      parent: Agent
+      agentOptions?: { model?: string; reasoningEffort?: string }
+      outputSchema?: Record<string, unknown>
+      maxDepth?: number
       signal?: AbortSignal
       delivery: 'parent' | 'caller'
     }): Promise<{
@@ -57,6 +64,17 @@ export interface DispatchHost extends CompositionHost {
       dispose: () => Promise<void>
     }>
   }
+}
+
+/**
+ * Whether the host's subagents service speaks the 0.2.2-rc.2 child surface
+ * (flattened `SubagentActivationSpec`). Same detector the registry uses
+ * (dsh-subagent-registry host-compat.ts): `waitForTreeWork` shipped with
+ * rc.2 (new tree types/index.d.ts:185) and is absent on every pre-rc.2 line
+ * this plugin's unchanged peer floors (>=0.2.0-rc.2) still cover.
+ */
+function rc2ChildSurface(host: DispatchHost): boolean {
+  return typeof (host.subagents as { waitForTreeWork?: unknown }).waitForTreeWork === 'function'
 }
 
 /** The registry's spawn-tool deny list (wayfinder ticket 03): the tools a leaf must not reach. */
@@ -138,20 +156,43 @@ export function createDispatch(host: DispatchHost, factoryOptions: DispatchFacto
 
     let activation: Awaited<ReturnType<DispatchHost['subagents']['startActivation']>>
     try {
-      activation = await host.subagents.startActivation({
-        provider,
-        label,
-        childId,
-        request: {
-          prompt: [{ type: 'text', text: request.prompt }],
-          parent: factoryOptions.parent,
-          ...(hasAgentOptions ? { agentOptions } : {}),
-          ...(request.outputSchema !== undefined ? { outputSchema: request.outputSchema } : {}),
-          ...(maxDepth !== undefined ? { maxDepth } : {}),
-        },
-        ...(request.signal !== undefined ? { signal: request.signal } : {}),
-        delivery: 'caller',
-      })
+      // 0.2.2-rc.2 flattened `SubagentActivationSpec` (types.d.ts:23 —
+      // `extends Omit<SubagentStartRequest, 'label' | 'signal'>`): the host
+      // implementation reads `spec.parent.id` (lib/index.js:3024) and
+      // `spec.prompt` (lib/index.js:1557) off the spec ITSELF, so a nested
+      // `request` block is a TypeError on every dispatch. Pre-rc.2 lines
+      // read the nested block; the feature-detect keeps both alive.
+      const spec = (rc2ChildSurface(host)
+        ? {
+            provider,
+            label,
+            childId,
+            prompt: [{ type: 'text', text: request.prompt }],
+            parent: factoryOptions.parent,
+            ...(hasAgentOptions ? { agentOptions } : {}),
+            ...(request.outputSchema !== undefined ? { outputSchema: request.outputSchema } : {}),
+            ...(maxDepth !== undefined ? { maxDepth } : {}),
+            // rc.2 makes `signal` a required spec field; a never-aborted
+            // signal preserves the old optional semantics when the caller
+            // supplies none.
+            signal: request.signal ?? new AbortController().signal,
+            delivery: 'caller' as const,
+          }
+        : {
+            provider,
+            label,
+            childId,
+            request: {
+              prompt: [{ type: 'text', text: request.prompt }],
+              parent: factoryOptions.parent,
+              ...(hasAgentOptions ? { agentOptions } : {}),
+              ...(request.outputSchema !== undefined ? { outputSchema: request.outputSchema } : {}),
+              ...(maxDepth !== undefined ? { maxDepth } : {}),
+            },
+            ...(request.signal !== undefined ? { signal: request.signal } : {}),
+            delivery: 'caller',
+          }) as Parameters<DispatchHost['subagents']['startActivation']>[0]
+      activation = await host.subagents.startActivation(spec)
     } catch (error) {
       // Failed before the start edge — the parked composition is unreachable.
       releaseChildComposition(childId)

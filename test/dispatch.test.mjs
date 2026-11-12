@@ -13,10 +13,11 @@ const { createDispatch } = await import('../lib/dispatch.js')
 const { installChildCompositionListener } = await import('../lib/composition.js')
 const { RosterError } = await import('../lib/errors.js')
 
-/** A fake parent good enough for resolveChildDepth (its exact shape only matters for spawner depths). */
-const PARENT = { id: 'parent-1' }
+/** A fake parent good enough for resolveChildDepth (its exact shape only matters for spawner depths):
+ *  rc.2's delegationDepthOf reads `agent.options.subagentDepth` and `agent.session.header.delegationDepth`. */
+const PARENT = { id: 'parent-1', options: {}, session: { header: { delegationDepth: 0 } } }
 
-function makeFakeHost({ usageEvents = [], childAgent } = {}) {
+function makeFakeHost({ usageEvents = [], childAgent, rc2 = false } = {}) {
   const handlers = {}
   const activations = []
   const warns = []
@@ -32,7 +33,11 @@ function makeFakeHost({ usageEvents = [], childAgent } = {}) {
       handlers[event] = handler
       return () => delete handlers[event]
     },
+    // rc2=true simulates a 0.2.2-rc.2 host: `waitForTreeWork` is the shipped
+    // surface detector (absent on pre-rc.2 lines), and the dispatch answers
+    // with the flattened SubagentActivationSpec on that branch.
     subagents: {
+      ...(rc2 ? { waitForTreeWork: async () => true } : {}),
       startActivation: async (spec) => {
         activations.push(spec)
         return {
@@ -126,6 +131,32 @@ test('usage folds from the child session and lands on the outcome; frontmatter r
     // The frontmatter `provider/model` route is split, never passed whole.
     const spec = host.activations.at(-1)
     assert.deepEqual(spec.request.agentOptions, { provider: 'prov-x', model: 'm-9', reasoningEffort: 'low' })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('rc.2 host surface (waitForTreeWork): the start-request fields ride the spec itself, no nested request block', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wf-dsp-'))
+  try {
+    makeRoster(dir, { worker: { deep: '1', model: 'prov-x/m-9', thinking: 'low' } })
+    const host = makeFakeHost({ rc2: true })
+    const dispatch = createDispatch(host, { parent: PARENT, runId: 'r9', agentsDir: dir })
+    await dispatch({ agentName: 'worker', prompt: 'p', label: 's1' })
+    const spec = host.activations.at(-1)
+    // Flattened rc.2 shape: top-level start-request fields, no `request` block.
+    assert.equal(spec.request, undefined)
+    assert.deepEqual(spec.prompt, [{ type: 'text', text: 'p' }])
+    assert.equal(spec.parent, PARENT)
+    assert.deepEqual(spec.agentOptions, { provider: 'prov-x', model: 'm-9', reasoningEffort: 'low' })
+    // deep 1 spawner: explicit relative depth budget on the spec itself.
+    assert.equal(typeof spec.maxDepth, 'number')
+    // rc.2 requires `signal`; the caller passed none — a never-aborted signal backs it.
+    assert.ok(spec.signal instanceof AbortSignal)
+    assert.equal(spec.signal.aborted, false)
+    assert.equal(spec.delivery, 'caller')
+    assert.equal(spec.provider, 'spawn')
+    assert.ok(spec.childId !== undefined)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

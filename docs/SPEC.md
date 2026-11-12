@@ -36,8 +36,12 @@ migration waves, inspections) into named, reviewable, resumable YAML workflows.
     (~80 lines; precedent: dsh-tui-pi). Keys: `name/deep/display_name/description/
     model/thinking/background/maxRounds`. Unknown frontmatter keys ignored (host parity).
   - Step → child: `ctx.subagents.startActivation({ provider: 'spawn', label,
-    request: { prompt, parent, agentOptions?, outputSchema?, maxDepth? }, signal,
-    delivery: 'caller' })` — the exact shape the official workflow-ptc engine uses.
+    prompt, parent, agentOptions?, outputSchema?, maxDepth?, signal,
+    delivery: 'caller' })` — 0.2.2-rc.2 flattened the `SubagentActivationSpec`
+    (the start-request fields ride the spec itself; the host reads
+    `spec.parent.id`/`spec.prompt` directly). Pre-rc.2 hosts read the nested
+    `request: { … }` block; the dispatch feature-detects the line via the
+    `waitForTreeWork` surface (present from rc.2) and keeps both shapes alive.
   - `parent` = `invocation.agent` (must be the exact live Agent; else `UNAUTHORIZED`).
   - **Label namespace**: `[wf] <runId>/<stepId>` — never a bare agent name (the
     registry's auto-resume claims bare-labeled one-shot children).
@@ -59,8 +63,10 @@ migration waves, inspections) into named, reviewable, resumable YAML workflows.
     `retry` (max/backoff-ms) applies to ordinary child failure
     (`SubagentResult.stopReason ≠ completed`); `ACTIVATION_LIMIT_REJECTED` is
     retryable-with-queueing, never a crash.
-  - Teardown: always `run.dispose()`-equivalent per activation; parent wrap-up must
-    call `ctx.subagents.waitForChildren(parent)` + idle recheck before completing.
+  - Teardown: always `run.dispose()`-equivalent per activation (rc.2 disposal
+    addresses exactly that activation — it no longer sweeps owned descendants);
+    parent wrap-up must call `ctx.subagents.waitForTreeWork(parent)` + idle
+    recheck before completing (`waitForChildren` was removed in 0.2.2).
   - `output: <json-schema>` → validated object in `SubagentResult.structured`;
     missing `structured` ≠ failure (host semantics) — acceptance must handle both.
 
