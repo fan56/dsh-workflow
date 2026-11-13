@@ -24,7 +24,7 @@
 // present in a bare `dsh-base` composition.
 
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -46,9 +46,15 @@ function fail(message, output = '') {
   process.exit(1)
 }
 
-const pack = spawnSync('npm', ['pack', '--pack-destination', work], { cwd: repoRoot, encoding: 'utf8' })
+// --ignore-scripts keeps the root `prepare` hook from writing to stdout, and
+// the tarball is located by listing the pack destination instead of parsing
+// npm's output (npm < 11 can run `prepare` during pack even with
+// --ignore-scripts; the build gate already produced lib/).
+const pack = spawnSync('npm', ['pack', '--pack-destination', work, '--ignore-scripts'], { cwd: repoRoot, encoding: 'utf8' })
 if (pack.status !== 0 || pack.error) fail('npm pack failed', `${pack.stdout}\n${pack.stderr}`)
-const tarball = path.join(work, pack.stdout.trim().split('\n').at(-1))
+const tarballName = readdirSync(work).find((f) => f.endsWith('.tgz'))
+if (!tarballName) fail('npm pack produced no tarball', `${pack.stdout}\n${pack.stderr}`)
+const tarball = path.join(work, tarballName)
 
 writeFileSync(path.join(profile, 'cordis.yml'), '# dsh profile root — empty; the tree is composed from the bundle patches\n[]\n')
 writeFileSync(path.join(profile, 'cordis.patch.yml'), '# scratch smoke profile: no extra patch layer\n[]\n')

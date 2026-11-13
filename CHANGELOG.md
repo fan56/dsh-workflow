@@ -1,12 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.2.3 - 2026-11-13
 
 ### Fixed
+- **The published package no longer carries an install lifecycle hook — `postinstall` became `prepare` — so pnpm 11 updates stop failing with `ERR_PNPM_IGNORED_BUILDS` (see dsh-subagent-registry#10).** pnpm 11 defaults to `strictDepBuilds`: an install of a dependency declaring an unapproved `preinstall`/`install`/`postinstall` exits non-zero, and the dsh host plugin manager rolls the update back — with the previous `postinstall` every update of this plugin failed that way. npm and pnpm never run `prepare` for registry dependencies, and pnpm's gate set is exactly those three install hooks, so the published manifest is now hook-free while dev closure linking keeps running from the root `prepare` hook. The linker also stands down when `INIT_CWD` is set and is not the repo root (npm's throwaway-clone `prepare` runs for git dependencies, and root installs invoked from a subdirectory), and `scripts/smoke-boot.mjs` packs with `--ignore-scripts` and locates the tarball by directory enumeration.
 - **Dispatch over the 0.2.2-rc.2 host**: the host flattened `SubagentActivationSpec` (`extends Omit<SubagentStartRequest, 'label' | 'signal'>` — the start-request fields ride the spec itself), and the host implementation reads `spec.parent.id` / `spec.prompt` directly. The plugin's nested `request: { … }` block therefore caused a `TypeError` on every dispatch under rc.2 — invisible to repo typecheck because `DispatchHost` self-declared the nested shape. The call now feature-detects the host line via the `waitForTreeWork` surface (shipped with rc.2, absent on pre-rc.2 lines): rc.2 hosts get the flattened spec (with a never-aborted `signal` backing the now-required field when the caller supplies none), pre-rc.2 hosts keep the nested block — matching the peer floors (`>=0.2.0-rc.2`, unchanged). `DispatchHost`'s declaration is flattened to the rc.2 shape so a future host reshape is visible to tsc again.
 
 ### Changed
-- Dev closure re-pinned to `0.2.2-rc.2`: devDependencies `dsh-agent` / `dsh-session` / `dsh-subagent` move `0.2.2-rc.1` → `0.2.2-rc.2` (official registry, lockfile advanced; the postinstall linker re-links `node_modules/@deepseek-ai/*` to the closure). Peer floors untouched.
+- Dev closure re-pinned to `0.2.2-rc.2`: devDependencies `dsh-agent` / `dsh-session` / `dsh-subagent` move `0.2.2-rc.1` → `0.2.2-rc.2` (official registry, lockfile advanced; the prepare linker re-links `node_modules/@deepseek-ai/*` to the closure). Peer floors untouched.
 - **ci.yml's newest-of(latest,next) comparator now mirrors publish.yml**: the rc segments compare NUMERICALLY per dot segment (`rc.10` > `rc.2` — the leftover plain string prerelease compare in ci.yml would have picked the OLDER rc once an index reaches two digits; publish.yml got the numeric form in 0.2.0).
 
 ## 0.2.1 - 2026-11-09
